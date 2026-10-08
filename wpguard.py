@@ -14,17 +14,20 @@
   wpguard.py logs     [SITE...]            find the entry point in web server access logs
   wpguard.py restore  SITE [--from DIR]    roll back DB + wp-content from a fix backup
   wpguard.py audit    SITE... [--format md|json] [--out F]   full inventory + findings export (secrets redacted)
+  wpguard.py wp      [--unsafe] SITE ARGS...   run ANY wp-cli command (plugins/themes not loaded unless --unsafe)
+  wpguard.py wpscan  [URL] ARGS...             run the real WPScan (local `wpscan` or docker), WPSCAN_TOKEN used if set
   wpguard.py recover  ARGS...              rebuild a wiped site from DB/dump (see `recover --help`)
 
 Options: --sites-file F  -j N  --report out.{json,html,txt}  --notify  --sigs FILE  --since DAYS
          --url https://real.site (pins WP_HOME/WP_SITEURL)  --lock (also DISALLOW_FILE_MODS + no auto-update)
+         --hashdb FILE (known-bad hashes)  --hashdb-good FILE (known-clean hashes, suppressed)
          --no-net  --clean-db  --prune  --delete-user ID  --log FILE  --top N
 
 Alerts (--notify) use env: WPGUARD_TELEGRAM_TOKEN + WPGUARD_TELEGRAM_CHAT, and/or WPGUARD_EMAIL (local SMTP).
 Vuln lookups: optional WPSCAN_TOKEN (free wpscan.com key). Cron:  */15 * * * * wpguard.py watch /var/www/x --notify
 Run as the site's file owner (sudo -u www-data). Needs php + mysql client on PATH (not for baseline/watch/logs).
 """
-import argparse, glob, gzip, hashlib, html, io, json, os, pathlib, re, shutil, smtplib, ssl, subprocess, sys, tarfile, time, zipfile
+import argparse, glob, gzip, sqlite3, hashlib, html, io, json, os, pathlib, re, shutil, smtplib, ssl, subprocess, sys, tarfile, time, zipfile
 import urllib.error, urllib.parse, urllib.request
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -82,6 +85,42 @@ UPLOADS_HT = """# wpguard: never execute scripts from uploads
 </IfModule>
 """
 NGINX = r"location ~* ^/wp-content/uploads/.*\.(php\d?|phtml|phar)$ { deny all; }"
+
+
+HASH_RE = re.compile(r"\b(?:[0-9a-fA-F]{64}|[0-9a-fA-F]{40}|[0-9a-fA-F]{32})\b")
+HASH_ALGO = {32: "md5", 40: "sha1", 64: "sha256"}
+HASHDB = {"bad": None, "good": None}  # algo -> set(hex); filled by main from --hashdb / --hashdb-good
+
+
+def load_hashdb(paths):
+    """Any file that contains hex md5/sha1/sha256 tokens: csv, tsv, txt, md5sum/sha256sum output, json, *.gz, sqlite."""
+    db = {"md5": set(), "sha1": set(), "sha256": set()}
+
+    def feed(text):
+        for h in HASH_RE.findall(text):
+            db[HASH_ALGO[len(h)]].add(h.lower())
+
+    for path in paths:
+        p = Path(path)
+        if p.suffix.lower() in (".db", ".sqlite", ".sqlite3"):
+            con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+            for (t,) in con.execute("select name from sqlite_master where type='table'").fetchall():
+                for row in con.execute(f'select * from "{t}"'):
+                    feed(" ".join(str(c) for c in row if isinstance(c, (str, bytes)) and c))
+        else:
+            with (gzip.open if p.suffix == ".gz" else open)(p, "rt", errors="ignore") as fh:
+                for line in fh:
+                    feed(line)
+    return db
+
+
+def hash_match(p, db):
+    with p.open("rb") as fh:
+        for algo, known in db.items():
+            if known:
+                fh.seek(0)
+                if hashlib.file_digest(fh, algo).hexdigest() in known:
+                    return algo
 
 
 class Rep:
@@ -196,6 +235,14 @@ def file_scan(site: Path, a, extra, rep):
                 if f.startswith(".") and f not in OK_HIDDEN:
                     hits[p] = "hidden file"
                     continue
+                bad, good = HASHDB["bad"], HASHDB["good"]
+                if bad or good:
+                    if size < 50_000_000:  # ponytail: hashes every file; narrow by ext if IO-bound
+                        if bad and (alg := hash_match(p, bad)):
+                            hits[p] = f"known-bad {alg} hash (hashdb)"
+                            continue
+                        if good and hash_match(p, good):
+                            continue
                 if size > 5_000_000:  # ponytail: skips huge files; raise if shells hide in big blobs
                     continue
                 if f in (".htaccess", ".user.ini", "php.ini", "wp-config.php") or ext in PHP_EXT or in_up:
@@ -1654,6 +1701,38 @@ def recover_main(argv: list[str]) -> None:
     print("New salts were written, so every cookie/session is invalid — that is intentional.")
 
 
+# ---------- full wp-cli / WPScan pass-through ----------
+def wp_passthrough(argv):
+    unsafe = "--unsafe" in argv
+    argv = [x for x in argv if x != "--unsafe"]
+    if not argv:
+        sys.exit("usage: wpguard wp [--unsafe] SITE <any wp-cli args>   e.g. wpguard wp /var/www/x plugin list")
+    if not WP.exists() or not shutil.which("php"):
+        sys.exit("run `setup` first and install php")
+    site, *rest = argv
+    cmd = ["php", str(WP), f"--path={Path(site).resolve()}", *([] if unsafe else ["--skip-plugins", "--skip-themes"]),
+           *(["--allow-root"] if os.geteuid() == 0 else []), *rest]
+    sys.exit(subprocess.run(cmd).returncode)
+
+
+def wpscan_passthrough(argv):
+    argv = list(argv)
+    if argv and not argv[0].startswith("-"):  # `wpscan https://site` == `wpscan --url https://site`
+        argv = ["--url", *argv]
+    if (tok := os.environ.get("WPSCAN_TOKEN")) and not any(x.startswith("--api-token") for x in argv):
+        argv += ["--api-token", tok]  # ponytail: visible in `ps`; use ~/.wpscan/scan.json to avoid
+    if exe := shutil.which("wpscan"):
+        cmd = [exe, *argv]
+    elif shutil.which("docker"):
+        cmd = ["docker", "run", "--rm", *(["-it"] if sys.stdin.isatty() else []), "wpscanteam/wpscan", *argv]
+    else:
+        sys.exit("WPScan not found. Install it: `gem install wpscan` (needs ruby) or docker. Free API token: https://wpscan.com/api")
+    print("note: WPScan actively probes the target; only scan sites you own or may test.", file=sys.stderr)
+    if not tok:
+        print("note: no WPSCAN_TOKEN set -> free mode, no vulnerability data.", file=sys.stderr)
+    sys.exit(subprocess.run(cmd).returncode)
+
+
 # ---------- cli ----------
 def write_report(path, reps):
     ext = Path(path).suffix
@@ -1670,6 +1749,10 @@ def write_report(path, reps):
 
 def main():
     global LIVE
+    if sys.argv[1:2] == ["wp"]:
+        return wp_passthrough(sys.argv[2:])
+    if sys.argv[1:2] == ["wpscan"]:
+        return wpscan_passthrough(sys.argv[2:])
     if sys.argv[1:2] == ["recover"]:
         return recover_main(sys.argv[2:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1683,6 +1766,8 @@ def main():
     ap.add_argument("--since", type=int, help="flag PHP modified / admins created in the last N days")
     ap.add_argument("--no-net", action="store_true")
     ap.add_argument("--clean-db", action="store_true")
+    ap.add_argument("--hashdb", action="append", default=[])
+    ap.add_argument("--hashdb-good", action="append", default=[])
     ap.add_argument("--url")
     ap.add_argument("--format", choices=["md", "json"])
     ap.add_argument("--out")
@@ -1696,6 +1781,10 @@ def main():
     selftest()
     if a.cmd == "setup":
         return setup()
+    for key, files in (("bad", a.hashdb), ("good", a.hashdb_good)):
+        if files:
+            HASHDB[key] = load_hashdb(files)
+            print(f"hashdb {key}: {sum(map(len, HASHDB[key].values()))} hashes", file=sys.stderr)
     sites = a.sites + (Path(a.sites_file).read_text().split() if a.sites_file else [])
     LIVE = a.j == 1
     if a.cmd == "logs":

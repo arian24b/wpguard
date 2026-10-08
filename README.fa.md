@@ -39,6 +39,8 @@ uv run wpguard.py baseline /var/www/site             # عکس‌برداری ا�
 | `logs [SITE...]` | یافتن راه نفوذ از روی لاگ دسترسی (brute force، xmlrpc، POST به افزونه‌ها، درخواست به شل‌ها) |
 | `restore SITE` | بازگردانی دیتابیس و `wp-content` از آخرین بکاپ `fix` |
 | `audit SITE...` | خروجی کامل موجودی سایت (نسخه‌ها، تنظیمات، افزونه‌ها، پوسته‌ها، کاربران، کرون، mu-plugins، ثابت‌های wp-config بدون اطلاعات محرمانه) به‌علاوه یافته‌های اسکن، به صورت Markdown یا JSON |
+| `wp [--unsafe] SITE ARGS...` | اجرای **هر** دستور wp-cli روی سایت، مثلاً `wpguard wp /var/www/x plugin list`. افزونه‌ها و پوسته‌ها بارگذاری نمی‌شوند (روی سایت آلوده امن است) مگر با `--unsafe` |
+| `wpscan [URL] ARGS...` | اجرای خود [WPScan](https://wpscan.com/) با همه گزینه‌هایش (برنامه محلی `wpscan` یا docker `wpscanteam/wpscan`). اگر `WPSCAN_TOKEN` تنظیم باشد به‌صورت `--api-token` اضافه می‌شود؛ بدون آن حالت رایگان است (بدون داده آسیب‌پذیری) |
 | `recover ARGS...` | بازسازی سایت پاک‌شده از دیتابیس یا dump (`recover --help`) |
 
 ## گزینه‌ها
@@ -51,6 +53,8 @@ uv run wpguard.py baseline /var/www/site             # عکس‌برداری ا�
 | `--notify` | هشدار هنگام یافته (متغیرهای محیطی پایین) |
 | `--sigs FILE` | امضاهای regex اضافه، هر خط یکی (مثلاً از مجموعه‌های maldet/Wordfence) |
 | `--since DAYS` | پرچم‌گذاری PHP تغییرکرده / ادمین ساخته‌شده در N روز اخیر |
+| `--hashdb FILE` | (`scan`/`fix`/`audit`) پایگاه هش‌های **مخرب** شناخته‌شده؛ قابل تکرار. هر فایلی که هش‌های hex از نوع md5/sha1/sha256 داشته باشد: `.csv`، `.tsv`، `.txt`، خروجی `md5sum`/`sha256sum`، `.json`، `.gz`، SQLite (`.db`/`.sqlite`). نوع هش از روی طول تشخیص داده می‌شود؛ فایل‌های منطبق گزارش (و در `fix` قرنطینه) می‌شوند |
+| `--hashdb-good FILE` | پایگاه هش‌های **سالم** شناخته‌شده (همان قالب‌ها)؛ فایل‌های منطبق نادیده گرفته می‌شوند و false positive کم می‌شود |
 | `--no-net` | بدون جست‌وجوی آنلاین wordpress.org / WPScan |
 | `--clean-db` | اعمال واقعی پاکسازی دیتابیس (در `fix` به‌صورت پیش‌فرض فقط dry-run است) |
 | `--delete-user ID` | (`fix`) حذف ادمین مشکوک، قابل تکرار |
@@ -74,6 +78,20 @@ uv run wpguard.py baseline /var/www/site             # عکس‌برداری ا�
 7. **قفل کردن.** پس از همه به‌روزرسانی‌ها: `harden SITE --lock --url ...`. برای به‌روزرسانی بعدی موقتاً `wp config delete DISALLOW_FILE_MODS` را اجرا کنید.
 8. **پایش.** همین حالا `baseline SITE`، سپس `watch` در کرون. بعد از هر به‌روزرسانی مجاز دوباره `baseline` بگیرید.
 9. **بازگشت** اگر چیزی خراب شد: `restore SITE`؛ فایل‌های قرنطینه در `../wpguard-quarantine/` هستند (دستی برگردانید).
+
+## راهنما: wp-cli، WPScan و پایگاه هش
+
+```bash
+uv run wpguard.py wp /var/www/site plugin list --status=active --format=json
+uv run wpguard.py wp /var/www/site user list --role=administrator
+uv run wpguard.py wp --unsafe /var/www/site cron event list      # افزونه‌ها را بارگذاری می‌کند: فقط روی سایت مطمئن
+
+export WPSCAN_TOKEN=xxxx                                           # کلید رایگان از wpscan.com/api (۲۵ درخواست در روز)؛ اختیاری
+uv run wpguard.py wpscan https://your.site --enumerate vp,vt,u --plugins-detection mixed
+
+uv run wpguard.py scan /var/www/site --hashdb malware.csv --hashdb-good vendor-clean.sha256
+```
+`wpscan` به `gem install wpscan` یا docker نیاز دارد و سایت زنده را از طریق HTTP بررسی می‌کند؛ فقط روی سایت خودتان استفاده کنید. هش پایگاه با همه فایل‌ها (تا ۵۰ مگابایت) مقایسه می‌شود، پس پایگاه بزرگ روی سایت بزرگ کندتر است؛ فقط از فهرست‌های معتبر (maldet یا نمونه‌های حادثه خودتان) استفاده کنید.
 
 ## راهنما: خروجی audit
 

@@ -37,6 +37,8 @@ uv run wpguard.py baseline /var/www/site             # snapshot the clean state
 | `logs [SITE...]` | find the entry point in access logs (brute force, xmlrpc, exploit POSTs, shell requests) |
 | `restore SITE` | roll DB + `wp-content` back from the latest `fix` backup |
 | `audit SITE...` | full inventory (WP/PHP versions, settings, plugins, themes, users by role, cron hooks, mu-plugins, drop-ins, `wp-config.php` constants with secrets redacted) plus all scan findings, exported as Markdown or JSON |
+| `wp [--unsafe] SITE ARGS...` | run **any** wp-cli command on a site, e.g. `wpguard wp /var/www/x plugin list`. Plugins/themes are not loaded (safe on infected sites) unless you pass `--unsafe` |
+| `wpscan [URL] ARGS...` | run the real [WPScan](https://wpscan.com/) with all its flags (local `wpscan`, else docker `wpscanteam/wpscan`). `WPSCAN_TOKEN` is added as `--api-token` if set; without it WPScan runs in free mode (no vulnerability data) |
 | `recover ARGS...` | rebuild a wiped site from the DB or a dump (see `recover --help`) |
 
 ## Options
@@ -49,6 +51,8 @@ uv run wpguard.py baseline /var/www/site             # snapshot the clean state
 | `--notify` | alert on findings (env below) |
 | `--sigs FILE` | extra regex signatures, one per line (e.g. exported from maldet/Wordfence sets) |
 | `--since DAYS` | flag PHP modified / admins created in the last N days |
+| `--hashdb FILE` | (`scan`/`fix`/`audit`) known-**bad** hash database; repeatable. Any file containing hex md5/sha1/sha256: `.csv`, `.tsv`, `.txt`, `md5sum`/`sha256sum` output, `.json`, `.gz`, SQLite (`.db`/`.sqlite`). Algorithm is detected by hash length; matching files are reported (and quarantined by `fix`) |
+| `--hashdb-good FILE` | known-**clean** hash database (same formats); matching files are skipped, which removes false positives |
 | `--no-net` | skip wordpress.org / WPScan lookups |
 | `--clean-db` | really apply DB cleanup (`fix` otherwise only dry-runs it) |
 | `--delete-user ID` | (`fix`) delete a rogue admin, repeatable |
@@ -72,6 +76,20 @@ Environment: `WPGUARD_TELEGRAM_TOKEN` + `WPGUARD_TELEGRAM_CHAT`, `WPGUARD_EMAIL`
 7. **Lock down.** After all updates: `harden SITE --lock --url ...`. To update later, temporarily remove `DISALLOW_FILE_MODS` (`wp config delete DISALLOW_FILE_MODS`).
 8. **Monitor.** `baseline SITE` now, `watch` from cron. Re-run `baseline` after every legitimate update, or `watch` reports it.
 9. **Rollback** if something broke: `restore SITE`; quarantined files are in `../wpguard-quarantine/` (move back by hand).
+
+## Guide: wp-cli, WPScan and hash databases
+
+```bash
+uv run wpguard.py wp /var/www/site plugin list --status=active --format=json
+uv run wpguard.py wp /var/www/site user list --role=administrator
+uv run wpguard.py wp --unsafe /var/www/site cron event list      # loads plugins/themes: only on a trusted site
+
+export WPSCAN_TOKEN=xxxx                                           # free key from wpscan.com/api (25 req/day); optional
+uv run wpguard.py wpscan https://your.site --enumerate vp,vt,u --plugins-detection mixed
+
+uv run wpguard.py scan /var/www/site --hashdb malware.csv --hashdb-good vendor-clean.sha256
+```
+`wpscan` needs `gem install wpscan` or docker. It probes the live site over HTTP, so use it only on sites you own. Hash databases are matched against every file (up to 50 MB), so a large database on a big site takes longer; use known-bad lists from sources you trust (maldet, your own incident samples).
 
 ## Guide: audit export
 

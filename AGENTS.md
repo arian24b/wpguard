@@ -23,6 +23,10 @@ Guidance for AI coding agents working in this repo. User-facing docs are in `REA
 - Mark deliberate shortcuts with a `# ponytail:` comment naming the ceiling.
 - Prefer stdlib and the shortest working change; no new abstractions or deps without need.
 
+## Pass-through commands
+
+`wp` and `wpscan` are dispatched at the top of `main()` before argparse, so every flag after them goes straight to wp-cli / WPScan (`wp_passthrough`, `wpscan_passthrough`). `wp` keeps `--skip-plugins --skip-themes` unless `--unsafe`. WPScan must stay an external tool (ruby gem or docker); do not vendor it. Hash databases: `load_hashdb` extracts md5/sha1/sha256 hex tokens from any text/gz/sqlite file by regex; `HASHDB["bad"|"good"]` is global state set in `main` and consumed in `file_scan`.
+
 ## Testing
 
 No test framework. `selftest()` (asserts on signatures, `.htaccess` rule, `judge`, `vkey`) runs on every invocation; extend it when changing detection logic. Pure-python commands (`baseline`, `watch`, `logs`) can be exercised on a fake dir containing an empty `wp-load.php`. wp-cli paths (`scan`, `fix`, `harden`, `restore`, DB clean, vuln checks) need a real WordPress + php + mysql: test on a disposable copy, never on a production site.
