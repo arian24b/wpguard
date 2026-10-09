@@ -1,56 +1,65 @@
 # AGENTS.md
 
-Guidance for AI coding agents working in this repo. User-facing docs are in `README.md`.
+Guidance for AI coding agents working in this repo. User-facing docs: `README.md` (English) and `README.fa.md` (Persian, keep in sync).
 
 ## Project
 
-`wpguard.py`: one-file CLI (Python >= 3.14, run with `uv run`) that scans/cleans/hardens/monitors WordPress sites via wp-cli. Stdlib only, except `pymysql` (PEP 723 header), imported lazily by `recover` for live MySQL. `recover` (rebuild a wiped site from the DB/dump) and the `HARDEN` wp-config constants live in the same file.
+`wpguard` is a PyPI-ready Python >= 3.14 package (`src/wpguard`, hatchling, console script `wpguard`, `python -m wpguard`). Runtime dependencies: none. Optional extras: `s3` (boto3), `mysql` (pymysql); both are imported lazily with a friendly error. Dev tooling: `uv sync`, `uv run ruff check .`, `uv run ruff format .`, `uv run pytest`, `uv build`.
 
-## Layout rules
+## Module map (`src/wpguard/`)
 
-- Keep everything in the single `wpguard.py`. No third-party dependencies beyond lazily imported `pymysql`; PHP serialized data is parsed by the built-in `php_unser`.
-- The `recover` section (after `# ---------- recover`) is self-contained: `recover_main(argv)` with its own argparse; names there are `src` (DB source), `db_audit`, `php_unser`.
-- State lives in `~/.local/share/wpguard/` (wp-cli.phar, `baseline-<sha1 of path>.json`). Backups (`wpguard-backup-<site>-<ts>.tar.zst` + `.sha256`, layout: `db.sql` and `site/...`; built by `make_backup`, used by `backup`, `fix`, `restore`) and quarantine (`wpguard-quarantine/`) go next to the site, never inside it. Backups use `tarfile` `x:zst`, which needs Python 3.14 (pinned in `.python-version`; `pyproject.toml` and the script header require `>=3.14`). The system `python3` may be older (here 3.13 cannot even parse `except A, B:`), so always run through `uv run`.
+| Module | Role |
+|---|---|
+| `cli.py` | argparse, config/profile merging (`apply_opts`), local vs ssh dispatch (`run_target`), exit codes, report/notify. `wp`, `wpscan`, `recover` are dispatched before argparse |
+| `config.py` | `wpguard.toml` (`Config`, `Target`, `resolve`: profile name, `host:/path`, or local path) |
+| `lockfile.py` | `wpguard.lock` (pins + feed digests), `lock` command, `pinned(a)` used by `fix`/`updates` |
+| `remote.py` | `ssh HOST "<remote_cmd> <argv>"`, `--pull` via rsync |
+| `wpcli.py` / `wpscan.py` / `recovery.py` | handlers: wp-cli (download/run/pass-through), WPScan (API + CLI), recovery from DB/dump |
+| `signatures.py` | regexes, `judge`, hash DB loading, `Detectors` built from flags (`build_detectors`) |
+| `behavior.py` / `yarascan.py` / `feeds.py` | heuristic score, YARA via `yara`/`yr` binary, downloadable signature feeds (+cache/index/digests) |
+| `scanner.py` / `dbscan.py` / `vulns.py` / `scan.py` | file walk, DB checks, update/abandonment/vuln checks, the `scan` command |
+| `fix.py` | `fix` (plan, `--dry-run`, confirm), quarantine + `manifest.json`, `undo`, `harden`, `reinstall` |
+| `backup.py` / `destinations.py` | archive (`tar.zst`), encrypt (age), verify, restore; Local/S3/Rsync destinations, concurrent upload, retention |
+| `monitor.py` / `audit.py` / `diffs.py` / `updates.py` / `schedule.py` | baseline/watch/logs, audit export, core/plugin diff, staging update advisor, cron/systemd helpers |
+| `report.py` / `util.py` | `Rep`, report files, alerts; HTTP/version/stamp helpers, `STATE_DIR` (`~/.local/share/wpguard`, override with `WPGUARD_HOME`) |
+
+Dependency direction: `cli` imports everything; command modules import `wpcli`, `report`, `signatures`, `scanner`, `util`; handlers (`wpcli`, `wpscan`, `recovery`) never import command modules. No cycles.
 
 ## Conventions
 
-- Command functions have the shape `fn(site: Path, a) -> Rep`; `logs` takes `(sites, a)`. `audit` returns its dict in `Rep.data` and logs nothing (stdout is the export); `main` renders it via `audit_md`/JSON. Output goes through `Rep.log` / `Rep.hit(kind, what, why)`, never bare `print` (parallel `-j` mode buffers per site). Only `hit` counts as a finding (drives exit code 1 and `--notify`).
-- Every wp-cli call goes through `wp()`, which always passes `--skip-plugins --skip-themes` so infected code is never executed. Keep it that way.
-- SQL passed to `wp db query` has backslashes eaten by MySQL: use `[(]`, `[.]` in `REGEXP`, not `\(`.
-- `search-replace` regexes use `#` as delimiter; patterns must not contain `#`.
-- Never auto-quarantine `wp-config.php` or `.htaccess` outside uploads (`KEEP`); report only.
-- `DISALLOW_FILE_MODS` / `AUTOMATIC_UPDATER_DISABLED` are applied only with `--lock`, because they break `plugin install`/updates. `WP_HOME`/`WP_SITEURL` only via `--url` (the file's values are placeholders; do not trust DB values on a hacked site).
-- Mark deliberate shortcuts with a `# ponytail:` comment naming the ceiling.
-- Prefer stdlib and the shortest working change; no new abstractions or deps without need.
-
-## Pass-through commands
-
-`wp` and `wpscan` are dispatched at the top of `main()` before argparse, so every flag after them goes straight to wp-cli / WPScan (`wp_passthrough`, `wpscan_passthrough`). `wp` keeps `--skip-plugins --skip-themes` unless `--unsafe`. WPScan must stay an external tool (ruby gem or docker); do not vendor it. Hash databases: `load_hashdb` extracts md5/sha1/sha256 hex tokens from any text/gz/sqlite file by regex; `HASHDB["bad"|"good"]` is global state set in `main` and consumed in `file_scan`.
+- Site commands are `fn(site: Path, a) -> Rep`; `logs` takes `(sites, a)`; `schedule` takes `(args, a)`; `audit` returns its dict in `Rep.data` (stdout is the export, so it logs nothing).
+- Output goes through `Rep.log` / `Rep.hit(kind, what, why)`, never bare `print` (parallel `-j` buffers per site). Only `hit` counts as a finding (drives exit code 1 and `--notify`). `Rep.exit` forces a failing exit code (failed verify/upload, remote exit code).
+- Call wp-cli only through `wpcli.wp` / `wpcli.jget` **as module attributes** (`wpcli.wp(...)`, never `from wpguard.wpcli import wp`): tests monkeypatch `wpcli.wp`. It always passes `--skip-plugins --skip-themes` unless `load=True`; only the update advisor's staging copy (which has its mail/HTTP guard) may load plugins.
+- File findings are `{Path: (kind, why)}`. Kinds `sig|hash|struct|extra` are safe to quarantine; `behavior|yara` are review-only unless `--aggressive`; `wp-config.php` and `.htaccess` outside uploads are never moved.
+- Options: add them to `build_parser()`; every dest is automatically valid as a config key and is forwarded to remote hosts by `serialize` unless listed in `LOCAL_ONLY`. List options use `action="append"` with default `None` (code uses `a.x or []`).
+- Config precedence: CLI > `[sites.NAME]` > `[defaults]` (`apply_opts` is first-writer-wins, so `run_target` applies the profile first and `[defaults]` second).
+- SQL passed to `wp db query` has backslashes eaten by MySQL: use `[(]`, `[.]` in `REGEXP`, not `\(`. `search-replace` regexes use `#` as delimiter; patterns must not contain `#`.
+- Destructive actions (`fix`, `restore`, `undo`, `--clean-db`, `--prune`, `--delete-user`, `updates --apply`) must keep: backup first, quarantine by move, plan + confirmation, `--dry-run`, dry-run default for DB rewrites.
+- Backups: `wpguard-backup-<site>-<YYYYmmdd-HHMMSS>.tar.zst[.age]` + `.sha256`, layout `db.sql` + `site/...`; `stamp()` is strictly increasing in-process; archives are opened with `x:zst` (never overwrite). Retention matches that exact name pattern per site.
+- Mark deliberate shortcuts with a `# ponytail:` comment naming the ceiling. Prefer stdlib; no new dependency without need.
 
 ## Lint / format
 
-`pyproject.toml` enables ruff `select = ["ALL"]` with a documented ignore list. Before finishing any change run `uv run ruff check .` and `uv run ruff format .` (both must be clean). Fix findings rather than extending the ignore list; use a targeted `# noqa: CODE  reason` only when the rule is wrong for that line. ruff formats `except A, B:` without parentheses (valid on 3.14).
+`pyproject.toml` enables ruff `select = ["ALL"]` with a documented ignore list. Before finishing any change run `uv run ruff check .` and `uv run ruff format .` (both must be clean). Fix findings instead of extending the ignore list; use a targeted `# noqa: CODE  reason` only when the rule is wrong for that line. ruff formats `except A, B:` without parentheses (valid on 3.14), so the system `python3` (maybe 3.13) cannot even parse the code: always use `uv run`.
 
 ## Testing
 
-No test framework. `selftest()` (asserts on signatures, `.htaccess` rule, `judge`, `vkey`) runs on every invocation; extend it when changing detection logic. Pure-python commands (`baseline`, `watch`, `logs`) can be exercised on a fake dir containing an empty `wp-load.php`. wp-cli paths (`scan`, `fix`, `harden`, `restore`, DB clean, vuln checks) need a real WordPress + php + mysql: test on a disposable copy, never on a production site.
+`uv run pytest` (about 100 tests, ~4 s). `tests/conftest.py` sets `WPGUARD_HOME` to a temp dir before importing wpguard and provides: `site` (fake WP root), `fake_wp` (scripted `wpcli.wp`), `ns('cmd', *flags)` (CLI namespace with defaults), `bin_dir` + `make_script` (fake `ssh`, `rsync`, `age`, `yara`, `crontab` on PATH), `FakeDest`-style destinations. Network is never used: patch `feeds.fetch` / `diffs.original_zip`, or pass `--no-net --no-feeds` to `scan`/`fix`. The update advisor's real `Stage` (PHP + MySQL) and live wp-cli behavior are **not** covered by tests; test those on a disposable site, never production.
 
-```bash
-mkdir -p /tmp/t/site/wp-content/uploads && touch /tmp/t/site/wp-load.php
-uv run wpguard.py baseline /tmp/t/site && echo '<?php eval(base64_decode($_POST[x]));' > /tmp/t/site/wp-content/uploads/a.php
-uv run wpguard.py watch /tmp/t/site; echo $?     # expect a [new] SIGNATURE finding, exit 1
-```
-(Baselines are written to `~/.local/share/wpguard/`; delete the test one afterwards.)
+## CI / release
+
+`.github/workflows/ci.yml`: ruff check + format check, pytest, build + wheel smoke test. `release.yml`: on a `v*` tag, test, build, publish to PyPI with trusted publishing (environment `pypi`). Bump `__version__` in `src/wpguard/__init__.py` (hatch reads it) before tagging.
 
 ## Safety
 
-- This is a defensive tool for sites the user owns. Do not add offensive features (exploitation, credential attacks, scanning third-party sites).
-- Destructive actions (`fix`, `restore`, `--clean-db`, `--prune`, `--delete-user`) must keep: backup first, quarantine by move (not delete), dry-run default for DB rewrites.
-- Treat files being scanned as untrusted data: never `exec`/`import`/`include` them. Do not paste real site passwords or dumps into logs or reports.
-- Do not run `fix`/`harden`/`restore` against a real site without the user's explicit instruction.
+- Defensive tool for sites the user owns. Do not add offensive features (exploitation, credential attacks, scanning third-party sites).
+- Treat scanned files and downloaded feeds as untrusted data: never `exec`/`import`/`include` them; feeds are fetched over https only, size-capped, and only when the user runs `sigs update`.
+- Never put real secrets, site passwords or dumps into tests, logs or reports.
+- Do not run `fix`/`harden`/`restore`/`updates --apply` against a real site without the user's explicit instruction.
 
 ## Known gaps / ideas
 
-- No bundled maldet/Wordfence signature feeds (`--sigs` accepts regexes).
-- `logs` assumes WordPress sits in the docroot and combined log format.
-- `recover`: downloads are not checksum-verified; DB password written unescaped into `wp-config.php`.
+- `logs` assumes WordPress sits in the docroot and the combined log format.
+- The update advisor tests plugins one at a time (no combined run) and shares one staging DB between candidates.
+- No maldet hex/ndb signatures (ClamAV `.ndb`) and no Wordfence feed.
+- `recovery.py`: downloads are not checksum-verified; the DB password is written unescaped into `wp-config.php`.

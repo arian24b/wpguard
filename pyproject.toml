@@ -1,32 +1,74 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
 [project]
 name = "wpguard"
-version = "0.1.0"
-description = "Scan, clean, harden and monitor hacked WordPress sites with wp-cli"
+dynamic = ["version"]
+description = "Scan, clean, harden, back up and monitor hacked WordPress sites with wp-cli"
+readme = "README.md"
 requires-python = ">=3.14"
-dependencies = ["pymysql"]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Arian Omrani" }]
+keywords = ["wordpress", "security", "malware", "webshell", "wp-cli", "backup", "incident-response"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: System :: Systems Administration",
+]
+dependencies = []
 
-[tool.uv]
-package = false
+[project.optional-dependencies]
+s3 = ["boto3>=1.34"]
+mysql = ["pymysql>=1.1"]
+all = ["boto3>=1.34", "pymysql>=1.1"]
+
+[project.urls]
+Homepage = "https://github.com/arian24b/wpguard"
+Issues = "https://github.com/arian24b/wpguard/issues"
+
+[project.scripts]
+wpguard = "wpguard.cli:main"
 
 [dependency-groups]
-dev = ["ruff"]
+dev = ["pytest>=8", "ruff"]
+
+[tool.hatch.version]
+path = "src/wpguard/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/wpguard"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/wpguard", "tests", "README.md", "README.fa.md", "LICENSE", "wpguard.example.toml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
 
 [tool.ruff]
 line-length = 120
 target-version = "py314"
+src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["ALL"]
 ignore = [
-    "D",       # docstrings: internal CLI helpers, the module docstring is the manual
-    "ANN",     # type annotations: untyped single-file script
+    "D",       # docstrings: internal CLI helpers, module docstrings are the manual
+    "ANN",     # type annotations: untyped script-style code
     "T201",    # print: this is a CLI
-    "S101",    # assert: selftest() is built on asserts
-    "S603",    # subprocess: running wp-cli, php, docker and clamscan is the job
-    "S607",    # partial executable path (php, docker, uv) is resolved from PATH on purpose
+    "S101",    # assert: tests and selftests
+    "S603",    # subprocess: running wp-cli, php, ssh, rsync, age, yara is the job
+    "S607",    # partial executable path (php, ssh, rsync) is resolved from PATH on purpose
     "S608",    # SQL strings: only fixed constants and the validated table prefix are interpolated
-    "S310",    # urlopen: fixed https URLs only
-    "S324",    # sha1 only derives a baseline filename, not security
+    "S310",    # urlopen: https URLs only (util.fetch enforces it)
+    "S324",    # sha1 only derives file names, not security
     "E501",    # long SQL/doc/message strings cannot be wrapped by ruff format
     "C901",    # complexity: long linear scan/fix flows
     "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",
@@ -35,11 +77,14 @@ ignore = [
     "FBT",     # boolean args
     "EM", "TRY003",  # exception message style
     "E731",    # short lambdas as local helpers
-    "PLW0603", # LIVE global is set once in main()
-    "PLC0415", # pymysql is imported lazily, only for a live MySQL
+    "PLC0415", # optional dependencies (boto3, pymysql) are imported lazily
+    "TC",      # typing-only import blocks: noise in a script, annotations are deferred in 3.14
     "CPY001",  # no copyright header
     "COM812", "ISC001",  # conflict with ruff format
 ]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["INP001", "S105", "S106", "S108", "SLF001", "ARG001", "ARG002", "ARG005", "PT011", "PLR0914", "RUF012"]
 
 [tool.ruff.format]
 quote-style = "double"

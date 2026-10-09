@@ -1,0 +1,29 @@
+# Copy to ./wpguard.toml or ~/.config/wpguard/wpguard.toml.  Pins live in wpguard.lock next to it.
+# Any CLI option can be used by its long name with dashes as underscores (since, hashdb, keep, no_net, ...).
+# Order of precedence: command line > [sites.NAME] > [defaults].
+
+[defaults]
+since = 14                      # flag PHP modified / admins created in the last 14 days
+keep = 7                        # backup retention: newest 7 per destination
+ignore = ["wp-content/cache/*"]
+
+[notify]                        # or env: WPGUARD_TELEGRAM_TOKEN / WPGUARD_TELEGRAM_CHAT / WPGUARD_EMAIL
+# telegram_token = "123456:ABC..."
+# telegram_chat = "123456789"
+# email = "me@example.com"
+
+[sites.blog]                    # wpguard scan blog
+path = "/var/www/blog"
+url = "https://blog.example.com"
+to = ["/srv/backups", "s3://my-bucket/blog", "rsync:backup:/srv/backups/blog"]
+encrypt_to = "age1..."          # optional: encrypt backups with age
+
+[sites.mina]                    # wpguard scan mina  ->  ssh mina "uvx wpguard scan /var/www/mina ..."
+ssh = "mina"                    # any host from ~/.ssh/config
+path = "/var/www/mina"          # path ON THE REMOTE host
+# remote_cmd = "~/.local/bin/uvx wpguard"   # default: uvx wpguard
+hashdb = ["/root/known-bad.csv"]            # paths here are read on the remote host
+
+[feeds.my-rules]                # extra signature feed: wpguard sigs update my-rules
+kind = "yara"                   # hash | regex | yara
+urls = ["https://example.com/rules/webshells.yar"]

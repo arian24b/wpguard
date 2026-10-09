@@ -1,142 +1,167 @@
 # wpguard
 
+[![CI](https://github.com/arian24b/wpguard/actions/workflows/ci.yml/badge.svg)](https://github.com/arian24b/wpguard/actions/workflows/ci.yml)
+
 **English** | [فارسی](README.fa.md)
 
-Single-file Python 3.14 + [uv](https://docs.astral.sh/uv/) CLI to scan, clean, harden and monitor hacked WordPress sites using [wp-cli](https://wp-cli.org/).
+Command line tool to scan, clean, harden, back up and monitor hacked WordPress sites, built on [wp-cli](https://wp-cli.org/). Python 3.14, no runtime dependencies (`boto3` for S3 and `pymysql` for `recover` are optional extras).
 
-Everything lives in one file, `wpguard.py`. It uses only the standard library, except `pymysql`, which uv installs from the script header and which `recover` needs only against a live MySQL (not for `--dump`).
+## Install
 
-## Requirements
+```bash
+uvx wpguard --help                 # run without installing (uv downloads Python 3.14 if needed)
+uv tool install wpguard            # or: pipx install wpguard
+pip install 'wpguard[s3]'          # S3 backups (boto3)   |   'wpguard[mysql]' for `recover` against a live MySQL
+wpguard setup                      # downloads wp-cli (sha512 verified) to ~/.local/share/wpguard
+```
 
-- Python **3.14** (pinned in `.python-version`; `uv` downloads it automatically, the system Python is not used)
-- Linux, `uv`, `php`, MySQL/MariaDB client on `PATH` (`baseline`, `watch`, `logs` need none of php/mysql)
-- Run as the **site's file owner** (`sudo -u www-data ...`) so new files get correct ownership
-- Shell access to the site's files and DB
+Requirements: Linux, `php` and a MySQL/MariaDB client for the site commands (not for `baseline`, `watch`, `logs`, `verify`). Run as the **site's file owner** (`sudo -u www-data wpguard ...`) so new files keep the right ownership. Optional tools it uses when present: `yara` (or YARA-X `yr`), `clamscan`, `age`, `rsync`, `ssh`, `wpscan`/docker.
 
 ## Quick start
 
 ```bash
-uv run wpguard.py setup                              # download wp-cli (sha512 verified)
-uv run wpguard.py scan /var/www/site                 # 1. look first, changes nothing
-sudo -u www-data uv run wpguard.py fix /var/www/site --url https://your.site
-uv run wpguard.py harden /var/www/site --lock --url https://your.site   # after everything is updated
-uv run wpguard.py baseline /var/www/site             # snapshot the clean state
-# cron, every 15 min:
-*/15 * * * * /path/uv run /path/wpguard.py watch /var/www/site --notify
+wpguard scan /var/www/site                       # 1. look first, changes nothing
+wpguard fix  /var/www/site --dry-run             # 2. see the full plan
+wpguard fix  /var/www/site --url https://your.site     # 3. does it (asks to confirm; --yes to skip)
+wpguard undo /var/www/site                       #    false positive? put quarantined files back
+wpguard harden /var/www/site --lockdown --url https://your.site   # after everything is updated
+wpguard baseline /var/www/site                   # snapshot the clean state
+wpguard schedule add watch /var/www/site --every 15m --install    # alert on any change
 ```
+
+`SITE` can be a path, a **profile name** from `wpguard.toml`, or **`host:/path`** to run it over ssh (see below).
 
 ## Commands
 
 | Command | What it does |
 |---|---|
-| `setup` | download wp-cli to `~/.local/share/wpguard/` |
-| `scan SITE...` | report only: webshell signatures, PHP in uploads, core/plugin checksum extras, `wp-config.php`/`.htaccess`/`.user.ini` tampering, hidden files, mu-plugins, ClamAV (if installed), DB injections, new admins, odd cron hooks, outdated/abandoned/vulnerable plugins |
-| `fix SITE...` | backup → scan → quarantine → delete chosen users → reinstall core/plugins/themes from wordpress.org → DB clean → harden → new salts → rescan → baseline |
-| `harden SITE...` | block PHP in uploads, apply the hardening constants (`HARDEN` in the script), perms 755/644, `--prune` removes inactive plugins/themes |
-| `baseline SITE...` | save SHA-256 of every file (media in uploads excluded; PHP/.htaccess there included) |
-| `watch SITE...` | diff against baseline; exit 1 and alert on new/changed/removed files, flags signature matches |
-| `logs [SITE...]` | find the entry point in access logs (brute force, xmlrpc, exploit POSTs, shell requests) |
-| `backup SITE...` | full backup: DB dump (`wp db export`) + all site files in one `wpguard-backup-<site>-<time>.tar.zst` (zstd) with a `.sha256` sidecar, mode 600, never overwrites. Needs Python 3.14 (uv fetches it) |
-| `restore SITE` | roll DB + files back from the latest backup (or `--from FILE.tar.zst`); verifies the `.sha256` first |
-| `audit SITE...` | full inventory (WP/PHP versions, settings, plugins, themes, users by role, cron hooks, mu-plugins, drop-ins, `wp-config.php` constants with secrets redacted) plus all scan findings, exported as Markdown or JSON |
-| `wp [--unsafe] SITE ARGS...` | run **any** wp-cli command on a site, e.g. `wpguard wp /var/www/x plugin list`. Plugins/themes are not loaded (safe on infected sites) unless you pass `--unsafe` |
-| `wpscan [URL] ARGS...` | run the real [WPScan](https://wpscan.com/) with all its flags (local `wpscan`, else docker `wpscanteam/wpscan`). `WPSCAN_TOKEN` is added as `--api-token` if set; without it WPScan runs in free mode (no vulnerability data) |
-| `recover ARGS...` | rebuild a wiped site from the DB or a dump (see `recover --help`) |
+| `scan` | read-only: signatures, hash DBs, YARA, behavior score, `wp-config.php`/`.htaccess`/`.user.ini` tampering, hidden files, mu-plugins, ClamAV, core/plugin checksum extras, DB injections, new admins, odd cron, outdated/abandoned/vulnerable plugins |
+| `fix` | scan → **plan** → confirm → backup → quarantine → reinstall core/plugins/themes (pinned versions if locked) → DB clean → harden → new salts → rescan → baseline. `--dry-run` stops after the plan |
+| `undo` | move quarantined files back (latest quarantine, `--from DIR`, `--only GLOB`) |
+| `harden` | block PHP in uploads, apply wp-config constants, perms 755/644; `--prune` removes inactive plugins/themes |
+| `diff` | unified diff of every modified core/plugin file against the official wordpress.org file |
+| `backup` | DB dump + all files → `wpguard-backup-<site>-<time>.tar.zst`, optional encryption, concurrent upload to several destinations, retention, verification |
+| `verify` | check a backup (checksum, readable archive, plausible `db.sql`, WordPress files present) |
+| `restore` | re-import the DB and files from a backup (checksum verified first) |
+| `baseline` / `watch` | SHA-256 snapshot / diff against it; exit 1 and alert on new, changed or removed files |
+| `lock` | write `wpguard.lock` (pinned core/plugin/theme versions and feed digests); `lock --check` reports drift |
+| `updates` | try every pending update on a **staging copy**, report which ones break the site; `--apply` applies the safe ones |
+| `logs` | find the entry point in access logs: brute force, xmlrpc, exploit POSTs, requests to shells you quarantined |
+| `audit` | full inventory + findings as Markdown or JSON (secrets redacted) |
+| `sigs list` / `sigs update` | signature feeds (maldet hashes, YARA rule sets) |
+| `schedule add\|remove\|show JOB SITE` | cron lines or systemd user timers for `watch backup scan sigs updates` |
+| `wp [--unsafe] SITE ARGS...` | run **any** wp-cli command (plugins/themes not loaded unless `--unsafe`) |
+| `wpscan [URL] ARGS...` | run the real [WPScan](https://wpscan.com/) (local binary or docker); `WPSCAN_TOKEN` becomes `--api-token` |
+| `recover ARGS...` | rebuild a wiped site from the DB or a dump (`recover --help`) |
+| `setup` | download wp-cli |
 
-## Options
+## Config file and profiles
 
-| Option | Meaning |
-|---|---|
-| `--sites-file F` | extra site paths, whitespace separated |
-| `-j N` | scan N sites in parallel (output printed per site at the end) |
-| `--report out.{json,html,txt}` | write a report |
-| `--notify` | alert on findings (env below) |
-| `--sigs FILE` | extra regex signatures, one per line (e.g. exported from maldet/Wordfence sets) |
-| `--since DAYS` | flag PHP modified / admins created in the last N days |
-| `--hashdb FILE` | (`scan`/`fix`/`audit`) known-**bad** hash database; repeatable. Any file containing hex md5/sha1/sha256: `.csv`, `.tsv`, `.txt`, `md5sum`/`sha256sum` output, `.json`, `.gz`, SQLite (`.db`/`.sqlite`). Algorithm is detected by hash length; matching files are reported (and quarantined by `fix`) |
-| `--hashdb-good FILE` | known-**clean** hash database (same formats); matching files are skipped, which removes false positives |
-| `--no-net` | skip wordpress.org / WPScan lookups |
-| `--clean-db` | really apply DB cleanup (`fix` otherwise only dry-runs it) |
-| `--delete-user ID` | (`fix`) delete a rogue admin, repeatable |
-| `--prune` | (`harden`/`fix`) delete inactive plugins and themes |
-| `--url URL` | pin `WP_HOME`/`WP_SITEURL` (defeats DB siteurl hijack) |
-| `--lock` | also set `DISALLOW_FILE_MODS` + `AUTOMATIC_UPDATER_DISABLED` (blocks updates; use last) |
-| `--log F` / `--top N` | (`logs`) log files (plain or `.gz`) / rows per section |
-| `--format md\|json` / `--out FILE` | (`audit`) export format (defaults to json if `--out` ends in `.json`, else md) and destination (default stdout) |
-| `--out DIR` | (`backup`) destination directory (default: next to the site, must be outside it). `audit` uses `--out` as the output file |
-| `--no-uploads` | (`backup`) leave out `wp-content/uploads` |
-| `--from FILE` | (`restore`) specific backup archive |
+`wpguard.toml` (searched in `./` then `~/.config/wpguard/`, or `--config FILE`; see `wpguard.example.toml`):
 
-Environment: `WPGUARD_TELEGRAM_TOKEN` + `WPGUARD_TELEGRAM_CHAT`, `WPGUARD_EMAIL` (local SMTP), `WPSCAN_TOKEN` (free wpscan.com key, adds CVE lookups).
+```toml
+[defaults]
+since = 14
+keep = 7
 
-## Guide: cleaning a hacked site
+[sites.blog]
+path = "/var/www/blog"
+url = "https://blog.example.com"
+to = ["/srv/backups", "s3://my-bucket/blog", "rsync:backup:/srv/backups/blog"]
 
-1. **Isolate.** Put the site in maintenance mode or restrict by IP while you work.
-2. **Scan first.** `scan SITE --since 14 --report before.html`. Read every line; note unknown admins and `VULN`/`abandoned`/`source` entries (probable entry point).
-3. **Find the hole.** `logs SITE` (use `--log` for non-default paths). Look at POSTs to plugin PHP files and who requested the files you later quarantine.
-4. **Fix.** `fix SITE --url https://your.site --delete-user 7`. Review the DB cleanup dry-run output, then rerun with `--clean-db` if the matches are really malicious.
-5. **Premium/custom plugins** reported as `SKIP` are not on wordpress.org: reinstall them from the vendor by hand. Never use nulled copies.
-6. **Manual items `fix` cannot do:** change DB, FTP/SSH, hosting and WordPress passwords; review `wp-config.php`; remove unknown users; check quarantine for false positives.
-7. **Lock down.** After all updates: `harden SITE --lock --url ...`. To update later, temporarily remove `DISALLOW_FILE_MODS` (`wp config delete DISALLOW_FILE_MODS`).
-8. **Monitor.** `baseline SITE` now, `watch` from cron. Re-run `baseline` after every legitimate update, or `watch` reports it.
-9. **Rollback** if something broke: `restore SITE`; quarantined files are in `../wpguard-quarantine/` (move back by hand).
+[sites.mina]
+ssh = "mina"                      # a host from ~/.ssh/config
+path = "/var/www/mina"            # path on the remote host
+```
 
-## Guide: wp-cli, WPScan and hash databases
+Now `wpguard scan blog`, `wpguard backup --all`, `wpguard fix mina --dry-run` work. Any CLI option can be a config key (long name, dashes → underscores). Precedence: command line > `[sites.NAME]` > `[defaults]`. Unknown keys are an error. `[notify]` holds `telegram_token`, `telegram_chat`, `email` (env vars `WPGUARD_TELEGRAM_TOKEN`, `WPGUARD_TELEGRAM_CHAT`, `WPGUARD_EMAIL` win; keep the file private).
+
+### wpguard.lock
+
+`wpguard lock blog` records core, plugin and theme versions (and the digests of downloaded signature feeds) in `wpguard.lock` next to the config; commit it. Then:
+
+- `fix` reinstalls the **pinned** versions instead of "latest" (no surprise major jumps while cleaning),
+- `lock --check` exits 1 when something drifted (new plugin, version changed, feed changed): a good cron job,
+- `updates --apply` refreshes the pins for the updates it applied.
+
+## Remote sites over SSH
 
 ```bash
-uv run wpguard.py wp /var/www/site plugin list --status=active --format=json
-uv run wpguard.py wp /var/www/site user list --role=administrator
-uv run wpguard.py wp --unsafe /var/www/site cron event list      # loads plugins/themes: only on a trusted site
-
-export WPSCAN_TOKEN=xxxx                                           # free key from wpscan.com/api (25 req/day); optional
-uv run wpguard.py wpscan https://your.site --enumerate vp,vt,u --plugins-detection mixed
-
-uv run wpguard.py scan /var/www/site --hashdb malware.csv --hashdb-good vendor-clean.sha256
+wpguard scan mina:/var/www/site          # ad-hoc: host from ~/.ssh/config, path on the remote
+wpguard scan mina                        # profile with ssh = "mina"
+wpguard backup mina --to s3://bkt/mina --pull ./pulled     # remote backup, archive rsync'ed back
 ```
-`wpscan` needs `gem install wpscan` or docker. It probes the live site over HTTP, so use it only on sites you own. Hash databases are matched against every file (up to 50 MB), so a large database on a big site takes longer; use known-bad lists from sources you trust (maldet, your own incident samples).
 
-## Guide: backup and restore
+wpguard runs the same command on the remote machine through `ssh <host> <remote_cmd> ...`, so your `~/.ssh/config` (keys, ProxyJump, ports) is used as-is. The remote needs `uv` (the default `remote_cmd` is `uvx wpguard`; set `remote_cmd = "~/.local/bin/wpguard"` per profile if it is installed). Your CLI options and config values are forwarded; `--config`, `--report`, `-j`, `--pull` stay local. Exit codes propagate (1 = findings). Paths in options such as `--hashdb` are read **on the remote host**.
+
+## Detection
+
+- **Signatures** (built in) and `--sigs FILE` (your own regexes; blank/invalid lines are ignored).
+- **Hash databases**: `--hashdb` known-bad, `--hashdb-good` known-clean (suppresses findings). Any file with hex md5/sha1/sha256: csv, txt, json, `.gz`, ClamAV `.hdb`, SQLite.
+- **Behavior score** (`--behavior-threshold`, default 5; `--no-behavior`): dangerous-call density, hex/chr obfuscation, high entropy, very long lines, double extensions, PHP in asset dirs, names used by known malware, mtime far newer than siblings or in the future. **Review only**: `fix` does not quarantine behavior or YARA findings unless you pass `--aggressive`.
+- **YARA**: `--yara RULES.yar` (repeatable) through the `yara` or `yr` binary.
+- **Feeds**: `wpguard sigs update` downloads maldet md5 hashes ([rfxn](https://www.rfxn.com/projects/linux-malware-detect/)), [php-malware-finder](https://github.com/nbs-system/php-malware-finder) (LGPL-3.0) and [Neo23x0/signature-base](https://github.com/Neo23x0/signature-base) webshell rules (Detection Rule License 1.1: attribution). They are cached under `~/.local/share/wpguard/feeds`, used automatically by `scan`/`fix` (`--no-feeds` disables) and their digests are pinned by `lock`. Add your own with `[feeds.NAME]` in the config.
+- **Core/plugin diff**: `wpguard diff SITE [--core] [--plugin SLUG]` shows what an attacker changed in an official file.
+- `--ignore GLOB` (repeatable, or `ignore = [...]` in config) silences known-good paths.
+
+## Safer fix
+
+`fix` always prints the plan (what will be quarantined, what is *only* flagged for review, which users will be deleted, which versions will be installed) and then asks `Proceed? [y/N]`. Non-interactive runs refuse unless `--yes`; `-j > 1` requires `--yes` or `--dry-run`. Quarantined files are **moved** (never deleted) into `<site parent>/wpguard-quarantine/<site>-<time>/files/` with a `manifest.json`; `wpguard undo` puts them back. `wp-config.php` and `.htaccess` outside uploads are only ever reported. A backup (without uploads) is taken before anything changes.
+
+## Backups
 
 ```bash
-uv run wpguard.py backup /var/www/site --out /srv/backups          # DB + files (+ uploads)
-uv run wpguard.py backup /var/www/site --no-uploads                # small, code + DB only
-uv run wpguard.py restore /var/www/site --from /srv/backups/wpguard-backup-site-20261009-113206.tar.zst
+wpguard backup blog                                   # to the destinations in the profile (or next to the site)
+wpguard backup /var/www/site --out /srv/backups --verify --keep 7
+wpguard backup blog --to s3://bkt/blog --to rsync:backup:/srv/b --encrypt-to age1... --keep 14
+wpguard verify blog --out /srv/backups                # latest local backup
+wpguard restore /var/www/site --from /srv/backups/wpguard-backup-site-20261009-113206.tar.zst
 ```
-The archive contains `db.sql` and the site tree under `site/`; it includes `wp-config.php` (DB password), so keep it private. `fix` makes an uploads-free backup automatically before changing anything. `restore` overwrites files from the archive and re-imports the DB; it does not delete files that are not in the archive.
 
-## Guide: audit export
+Archive layout: `db.sql` + `site/...` in a zstd tar, mode 600, with a `.sha256` sidecar; an existing backup is never overwritten. **Destinations** (`--to`, repeatable): a local directory, `s3://bucket/prefix` (`boto3`, standard `AWS_*` env, `AWS_ENDPOINT_URL` for MinIO/R2), `rsync:HOST:/path` (HOST may be an ssh alias). All destinations upload **concurrently**; each is size-checked after upload and one failing destination does not stop the others (exit 1). **Retention** (`--keep N`) keeps the newest N per destination and site, and only runs after a verified upload. `--verify` checks the archive before uploading. `--encrypt-to` needs [`age`](https://age-encryption.org); restore/verify of such files needs `--age-identity KEY`. `--no-uploads` leaves out `wp-content/uploads`. The archive contains `wp-config.php` (DB password): keep it private.
+
+## Update advisor
+
+`wpguard updates SITE` lists pending core/plugin/theme updates and tests **each one** on a throwaway copy: files (without uploads) plus a cloned database, served by PHP's built-in server on 127.0.0.1. After every update it requests `/`, `/wp-login.php`, `/wp-admin/` (add more with `--check-url`) and reads the server log; 5xx pages and PHP fatals are reported as `BREAKS`, then that plugin is rolled back and the next one is tested alone. Inside the copy outgoing mail and HTTP (except wordpress.org) are blocked and WP-Cron is off, so loading the site's plugins cannot e-mail customers. Needs `php` and a MySQL user that may `CREATE DATABASE` (or `--stage-db EXISTING_EMPTY_DB`). `--apply` backs up and then updates only the items that passed. `--keep-stage` leaves the copy for inspection.
+
+## Scheduler
 
 ```bash
-uv run wpguard.py audit /var/www/site --out site-audit.md
-uv run wpguard.py audit /var/www/a /var/www/b -j 2 --format json --out audits.json   # list of sites
+wpguard schedule show backup blog --daily 03:30          # prints the cron line
+wpguard schedule add watch blog --every 15m --install    # writes it to your crontab (idempotent, marker comments)
+wpguard schedule add backup blog --daily 03:30 --systemd --install    # systemd user timer
+wpguard schedule remove watch blog
 ```
-Read-only (same checks as `scan`, plus inventory). Use it for before/after comparison or to hand a report to a client; DB password, DB user and salts are redacted, but emails and usernames are included, so share carefully.
 
-## Guide: site fully wiped
+Jobs: `watch backup scan sigs updates`; `watch`, `scan` and `updates` run with `--notify`. Put alert settings in `[notify]` (cron has no environment). For systemd user timers to run while logged out: `loginctl enable-linger $USER`.
 
-```bash
-uv run wpguard.py recover --dump /backup/site.sql --db NAME --user U --password 'P' --host 127.0.0.1 --out site --list   # inventory only
-uv run wpguard.py recover --dump /backup/site.sql ... --out site     # download core/plugins/themes at DB versions
-```
-Then restore `uploads/` and premium code from a backup, point the vhost at `site/`, and continue from step 4 above.
+## Other guides
+
+**Cleaning a hacked site**: isolate the site → `scan --since 14` → `logs` (find the hole: POSTs to plugin PHP, requests to files you later quarantine) → `fix --dry-run`, then `fix` → reinstall premium plugins marked `SKIP` from the vendor → change DB/FTP/SSH/WordPress passwords and remove unknown admins → `harden --lockdown` after updating → `baseline` + `schedule add watch`.
+
+**Wiped site**: `wpguard recover --dump site.sql --db NAME --user U --out site --list` (inventory), then without `--list` to download core/plugins/themes at the versions the DB records; restore uploads and premium code from a backup and continue as above.
+
+**Audit**: `wpguard audit blog --out blog.md` (or `.json`): versions, settings, plugins, themes, users by role, cron hooks, mu-plugins, drop-ins, `wp-config.php` constants with DB user/password/salts redacted, plus all findings.
 
 ## Development
 
-`pyproject.toml` configures ruff with `select = ["ALL"]` (the ignores are listed with reasons there).
-
 ```bash
-uv run ruff check .
-uv run ruff format .
+uv sync
+uv run ruff check . && uv run ruff format --check .      # ruff, select = ["ALL"] (ignores are listed with reasons in pyproject.toml)
+uv run pytest
+uv build
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs ruff, pytest and a wheel smoke test on every push and pull request. Pushing a `v*` tag runs `release.yml` and publishes to PyPI through trusted publishing (configure the publisher once on pypi.org).
 
 ## What it does NOT do
 
-- It is heuristic. Obfuscated commercial plugins may be flagged (false positives) and novel shells may be missed. It does not replace a WAF or server-level scanning.
-- DB cleaning is regex-based. Always read the dry run.
-- Quarantine paths are outside the web root, in `<site parent>/wpguard-quarantine/`; backups in `<site parent>/wpguard-backup-*`. Delete them when no longer needed (they contain old, possibly malicious files and DB dumps).
-- `fix` installs the **latest** plugin/theme versions; major jumps can break compatibility.
-- Scans never execute site code: wp-cli runs with `--skip-plugins --skip-themes`.
+- Detection is heuristic. Obfuscated commercial plugins can be flagged and new shells can be missed; it does not replace a WAF or server-level scanning.
+- DB cleaning is regex-based: read the dry run. `fix` installs pinned versions if locked, otherwise the **latest** (a major jump can break compatibility; `updates` exists to test that).
+- The update advisor needs a real PHP + MySQL environment; DB migrations done by a plugin update can leave the staging DB changed between candidates.
+- Remote mode requires `uv` (or an installed `wpguard`) on the remote host.
+- Quarantine and backups sit next to the site (outside the web root); delete them when no longer needed, they hold old malicious files and database dumps.
 
-## Safety notes
+## Safety and license
 
-Use only on sites you own or are authorised to administer. Back up before any `fix`/`restore` (the tool does, but verify `db.sql` is non-empty).
+Use only on sites you own or are authorised to administer. MIT license (`LICENSE`). Third-party signature feeds keep their own licenses (see above).
