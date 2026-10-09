@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/arian24b/wpguard/actions/workflows/ci.yml/badge.svg)](https://github.com/arian24b/wpguard/actions/workflows/ci.yml)
 
-**English** | [فارسی](README.fa.md)
+**English** | [فارسی](https://github.com/arian24b/wpguard/blob/main/README.fa.md)
 
 Command line tool to scan, clean, harden, back up and monitor hacked WordPress sites, built on [wp-cli](https://wp-cli.org/). Python 3.14, no runtime dependencies (`boto3` for S3 and `pymysql` for `recover` are optional extras).
 
