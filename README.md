@@ -35,7 +35,8 @@ uv run wpguard.py baseline /var/www/site             # snapshot the clean state
 | `baseline SITE...` | save SHA-256 of every file (media in uploads excluded; PHP/.htaccess there included) |
 | `watch SITE...` | diff against baseline; exit 1 and alert on new/changed/removed files, flags signature matches |
 | `logs [SITE...]` | find the entry point in access logs (brute force, xmlrpc, exploit POSTs, shell requests) |
-| `restore SITE` | roll DB + `wp-content` back from the latest `fix` backup |
+| `backup SITE...` | full backup: DB dump (`wp db export`) + all site files in one `wpguard-backup-<site>-<time>.tar.zst` (zstd) with a `.sha256` sidecar, mode 600, never overwrites. Needs Python 3.14 (uv fetches it) |
+| `restore SITE` | roll DB + files back from the latest backup (or `--from FILE.tar.zst`); verifies the `.sha256` first |
 | `audit SITE...` | full inventory (WP/PHP versions, settings, plugins, themes, users by role, cron hooks, mu-plugins, drop-ins, `wp-config.php` constants with secrets redacted) plus all scan findings, exported as Markdown or JSON |
 | `wp [--unsafe] SITE ARGS...` | run **any** wp-cli command on a site, e.g. `wpguard wp /var/www/x plugin list`. Plugins/themes are not loaded (safe on infected sites) unless you pass `--unsafe` |
 | `wpscan [URL] ARGS...` | run the real [WPScan](https://wpscan.com/) with all its flags (local `wpscan`, else docker `wpscanteam/wpscan`). `WPSCAN_TOKEN` is added as `--api-token` if set; without it WPScan runs in free mode (no vulnerability data) |
@@ -61,7 +62,9 @@ uv run wpguard.py baseline /var/www/site             # snapshot the clean state
 | `--lock` | also set `DISALLOW_FILE_MODS` + `AUTOMATIC_UPDATER_DISABLED` (blocks updates; use last) |
 | `--log F` / `--top N` | (`logs`) log files (plain or `.gz`) / rows per section |
 | `--format md\|json` / `--out FILE` | (`audit`) export format (defaults to json if `--out` ends in `.json`, else md) and destination (default stdout) |
-| `--from DIR` | (`restore`) specific backup dir |
+| `--out DIR` | (`backup`) destination directory (default: next to the site, must be outside it). `audit` uses `--out` as the output file |
+| `--no-uploads` | (`backup`) leave out `wp-content/uploads` |
+| `--from FILE` | (`restore`) specific backup archive |
 
 Environment: `WPGUARD_TELEGRAM_TOKEN` + `WPGUARD_TELEGRAM_CHAT`, `WPGUARD_EMAIL` (local SMTP), `WPSCAN_TOKEN` (free wpscan.com key, adds CVE lookups).
 
@@ -91,6 +94,15 @@ uv run wpguard.py scan /var/www/site --hashdb malware.csv --hashdb-good vendor-c
 ```
 `wpscan` needs `gem install wpscan` or docker. It probes the live site over HTTP, so use it only on sites you own. Hash databases are matched against every file (up to 50 MB), so a large database on a big site takes longer; use known-bad lists from sources you trust (maldet, your own incident samples).
 
+## Guide: backup and restore
+
+```bash
+uv run wpguard.py backup /var/www/site --out /srv/backups          # DB + files (+ uploads)
+uv run wpguard.py backup /var/www/site --no-uploads                # small, code + DB only
+uv run wpguard.py restore /var/www/site --from /srv/backups/wpguard-backup-site-20261009-113206.tar.zst
+```
+The archive contains `db.sql` and the site tree under `site/`; it includes `wp-config.php` (DB password), so keep it private. `fix` makes an uploads-free backup automatically before changing anything. `restore` overwrites files from the archive and re-imports the DB; it does not delete files that are not in the archive.
+
 ## Guide: audit export
 
 ```bash
@@ -106,6 +118,15 @@ uv run wpguard.py recover --dump /backup/site.sql --db NAME --user U --password 
 uv run wpguard.py recover --dump /backup/site.sql ... --out site     # download core/plugins/themes at DB versions
 ```
 Then restore `uploads/` and premium code from a backup, point the vhost at `site/`, and continue from step 4 above.
+
+## Development
+
+`pyproject.toml` configures ruff with `select = ["ALL"]` (the ignores are listed with reasons there).
+
+```bash
+uv run ruff check .
+uv run ruff format .
+```
 
 ## What it does NOT do
 

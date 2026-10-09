@@ -37,7 +37,8 @@ uv run wpguard.py baseline /var/www/site             # عکس‌برداری ا�
 | `baseline SITE...` | ذخیره SHA-256 همه فایل‌ها (رسانه‌های uploads مستثنی؛ PHP و `.htaccess` آنجا لحاظ می‌شود) |
 | `watch SITE...` | مقایسه با baseline؛ با تغییر، کد خروج ۱ و هشدار |
 | `logs [SITE...]` | یافتن راه نفوذ از روی لاگ دسترسی (brute force، xmlrpc، POST به افزونه‌ها، درخواست به شل‌ها) |
-| `restore SITE` | بازگردانی دیتابیس و `wp-content` از آخرین بکاپ `fix` |
+| `backup SITE...` | بکاپ کامل: dump دیتابیس (`wp db export`) + همه فایل‌های سایت در یک فایل `wpguard-backup-<site>-<time>.tar.zst` (فشرده‌سازی zstd) همراه با `.sha256`، دسترسی 600 و بدون بازنویسی بکاپ قبلی. به پایتون ۳.۱۴ نیاز دارد (uv خودش می‌گیرد) |
+| `restore SITE` | بازگردانی دیتابیس و فایل‌ها از آخرین بکاپ (یا `--from FILE.tar.zst`)؛ ابتدا `.sha256` را بررسی می‌کند |
 | `audit SITE...` | خروجی کامل موجودی سایت (نسخه‌ها، تنظیمات، افزونه‌ها، پوسته‌ها، کاربران، کرون، mu-plugins، ثابت‌های wp-config بدون اطلاعات محرمانه) به‌علاوه یافته‌های اسکن، به صورت Markdown یا JSON |
 | `wp [--unsafe] SITE ARGS...` | اجرای **هر** دستور wp-cli روی سایت، مثلاً `wpguard wp /var/www/x plugin list`. افزونه‌ها و پوسته‌ها بارگذاری نمی‌شوند (روی سایت آلوده امن است) مگر با `--unsafe` |
 | `wpscan [URL] ARGS...` | اجرای خود [WPScan](https://wpscan.com/) با همه گزینه‌هایش (برنامه محلی `wpscan` یا docker `wpscanteam/wpscan`). اگر `WPSCAN_TOKEN` تنظیم باشد به‌صورت `--api-token` اضافه می‌شود؛ بدون آن حالت رایگان است (بدون داده آسیب‌پذیری) |
@@ -63,7 +64,9 @@ uv run wpguard.py baseline /var/www/site             # عکس‌برداری ا�
 | `--lock` | اعمال `DISALLOW_FILE_MODS` و `AUTOMATIC_UPDATER_DISABLED` (جلوی به‌روزرسانی را می‌گیرد؛ آخر کار استفاده شود) |
 | `--log F` / `--top N` | (`logs`) فایل‌های لاگ (متن ساده یا `.gz`) / تعداد ردیف هر بخش |
 | `--format md\|json` / `--out FILE` | (`audit`) قالب و مقصد خروجی؛ اگر `--out` به `.json` ختم شود json، وگرنه md |
-| `--from DIR` | (`restore`) مسیر بکاپ مشخص |
+| `--out DIR` | (`backup`) پوشه مقصد (پیش‌فرض: کنار سایت، باید بیرون از آن باشد). در `audit` همین گزینه فایل خروجی است |
+| `--no-uploads` | (`backup`) بدون `wp-content/uploads` |
+| `--from FILE` | (`restore`) فایل بکاپ مشخص |
 
 متغیرهای محیطی: `WPGUARD_TELEGRAM_TOKEN` و `WPGUARD_TELEGRAM_CHAT`، `WPGUARD_EMAIL` (SMTP محلی)، `WPSCAN_TOKEN` (کلید رایگان wpscan.com برای جست‌وجوی CVE).
 
@@ -93,6 +96,15 @@ uv run wpguard.py scan /var/www/site --hashdb malware.csv --hashdb-good vendor-c
 ```
 `wpscan` به `gem install wpscan` یا docker نیاز دارد و سایت زنده را از طریق HTTP بررسی می‌کند؛ فقط روی سایت خودتان استفاده کنید. هش پایگاه با همه فایل‌ها (تا ۵۰ مگابایت) مقایسه می‌شود، پس پایگاه بزرگ روی سایت بزرگ کندتر است؛ فقط از فهرست‌های معتبر (maldet یا نمونه‌های حادثه خودتان) استفاده کنید.
 
+## راهنما: بکاپ و بازگردانی
+
+```bash
+uv run wpguard.py backup /var/www/site --out /srv/backups          # دیتابیس + فایل‌ها (+ uploads)
+uv run wpguard.py backup /var/www/site --no-uploads                # سبک: فقط کد و دیتابیس
+uv run wpguard.py restore /var/www/site --from /srv/backups/wpguard-backup-site-20261009-113206.tar.zst
+```
+آرشیو شامل `db.sql` و درخت سایت زیر `site/` است و `wp-config.php` (رمز دیتابیس) را هم دارد؛ پس خصوصی نگهش دارید. `fix` پیش از هر تغییر خودکار یک بکاپ بدون uploads می‌گیرد. `restore` فایل‌ها را روی سایت می‌نویسد و دیتابیس را دوباره import می‌کند؛ فایل‌هایی که در آرشیو نیستند را حذف نمی‌کند.
+
 ## راهنما: خروجی audit
 
 ```bash
@@ -108,6 +120,15 @@ uv run wpguard.py recover --dump /backup/site.sql --db NAME --user U --password 
 uv run wpguard.py recover --dump /backup/site.sql ... --out site     # دانلود هسته/افزونه/پوسته با نسخه‌های ثبت‌شده در دیتابیس
 ```
 سپس `uploads/` و کدهای پولی را از بکاپ برگردانید، vhost را به `site/` اشاره دهید و از مرحله ۴ بالا ادامه دهید.
+
+## توسعه
+
+`pyproject.toml` ابزار ruff را با `select = ["ALL"]` تنظیم می‌کند (موارد ignore شده با دلیل همان‌جا نوشته شده‌اند).
+
+```bash
+uv run ruff check .
+uv run ruff format .
+```
 
 ## محدودیت‌ها
 

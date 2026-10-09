@@ -12,7 +12,8 @@
   wpguard.py baseline SITE...              snapshot file hashes (run on a CLEAN site)
   wpguard.py watch    SITE...              diff against baseline; exit 1 + alert on change (cron)
   wpguard.py logs     [SITE...]            find the entry point in web server access logs
-  wpguard.py restore  SITE [--from DIR]    roll back DB + wp-content from a fix backup
+  wpguard.py backup   SITE... [--out DIR] [--no-uploads]   DB + files -> wpguard-backup-*.tar.zst (+ .sha256)
+  wpguard.py restore  SITE [--from FILE]   roll back DB + files from a backup .tar.zst
   wpguard.py audit    SITE... [--format md|json] [--out F]   full inventory + findings export (secrets redacted)
   wpguard.py wp      [--unsafe] SITE ARGS...   run ANY wp-cli command (plugins/themes not loaded unless --unsafe)
   wpguard.py wpscan  [URL] ARGS...             run the real WPScan (local `wpscan` or docker), WPSCAN_TOKEN used if set
@@ -21,14 +22,38 @@
 Options: --sites-file F  -j N  --report out.{json,html,txt}  --notify  --sigs FILE  --since DAYS
          --url https://real.site (pins WP_HOME/WP_SITEURL)  --lock (also DISALLOW_FILE_MODS + no auto-update)
          --hashdb FILE (known-bad hashes)  --hashdb-good FILE (known-clean hashes, suppressed)
+         --out DIR (backup destination, default: next to the site)  --no-uploads (backup without wp-content/uploads)
          --no-net  --clean-db  --prune  --delete-user ID  --log FILE  --top N
 
 Alerts (--notify) use env: WPGUARD_TELEGRAM_TOKEN + WPGUARD_TELEGRAM_CHAT, and/or WPGUARD_EMAIL (local SMTP).
 Vuln lookups: optional WPSCAN_TOKEN (free wpscan.com key). Cron:  */15 * * * * wpguard.py watch /var/www/x --notify
 Run as the site's file owner (sudo -u www-data). Needs php + mysql client on PATH (not for baseline/watch/logs).
 """
-import argparse, glob, gzip, sqlite3, hashlib, html, io, json, os, pathlib, re, shutil, smtplib, ssl, subprocess, sys, tarfile, time, zipfile
-import urllib.error, urllib.parse, urllib.request
+
+import argparse
+import contextlib
+import glob
+import gzip
+import hashlib
+import html
+import io
+import json
+import os
+import pathlib
+import re
+import shutil
+import smtplib
+import sqlite3
+import ssl
+import subprocess
+import sys
+import tarfile
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -39,8 +64,15 @@ WP = Path.home() / ".local/share/wpguard/wp-cli.phar"
 URL = "https://github.com/wp-cli/wp-cli/releases/latest/download/wp-cli.phar"
 PHP_EXT = {".php", ".phtml", ".php3", ".php4", ".php5", ".php7", ".phar", ".inc", ".suspected"}
 # wp-config.php constants applied by `harden`. LOCK ones block plugin/theme installs + updates, so only with --lock.
-HARDEN = {"FORCE_SSL_ADMIN": "true", "WP_AUTO_UPDATE_CORE": "false", "WP_DEBUG": "false", "WP_DEBUG_DISPLAY": "false",
-          "FS_CHMOD_FILE": "0644", "FS_CHMOD_DIR": "0755", "DISALLOW_FILE_EDIT": "true"}
+HARDEN = {
+    "FORCE_SSL_ADMIN": "true",
+    "WP_AUTO_UPDATE_CORE": "false",
+    "WP_DEBUG": "false",
+    "WP_DEBUG_DISPLAY": "false",
+    "FS_CHMOD_FILE": "0644",
+    "FS_CHMOD_DIR": "0755",
+    "DISALLOW_FILE_EDIT": "true",
+}
 HARDEN_LOCK = {"DISALLOW_FILE_MODS": "true", "AUTOMATIC_UPDATER_DISABLED": "true"}
 OK_HIDDEN = {".htaccess", ".user.ini", ".well-known", ".htpasswd", ".gitignore", ".maintenance"}
 KEEP = {"wp-config.php", ".htaccess"}  # report only, never auto-quarantine (outside uploads)
@@ -57,20 +89,48 @@ SIG = re.compile(rb"""(?isx)
   | FilesMan | c99shell | r57shell | b374k | IndoXploit | WSO\s*[0-9.]* | Web\s*Shell | Priv8
   | [A-Za-z0-9+/=]{600,}
 """)
-CFG_BAD = re.compile(rb"eval\s*\(|base64_decode|gzinflate|str_rot13|auto_prepend_file|\$_(?:GET|POST|REQUEST|COOKIE)"
-                     rb"|(?:include|require)(?:_once)?[^;\n]*\.(?:ico|jpe?g|png|gif|txt|log|tmp)\b", re.I)
-HT_BAD = re.compile(rb"RewriteRule[^\n]*https?://(?!%\{)|auto_(?:prepend|append)_file"
-                    rb"|(?:AddHandler|AddType)[^\n]*php[^\n]*\.(?:jpe?g|png|gif|ico|txt|html?|css|js)\b", re.I)
-AUTO = re.compile(rb"auto_(?:prepend|append)_file", re.I)
+CFG_BAD = re.compile(
+    rb"eval\s*\(|base64_decode|gzinflate|str_rot13|auto_prepend_file|\$_(?:GET|POST|REQUEST|COOKIE)"
+    rb"|(?:include|require)(?:_once)?[^;\n]*\.(?:ico|jpe?g|png|gif|txt|log|tmp)\b",
+    re.IGNORECASE,
+)
+HT_BAD = re.compile(
+    rb"RewriteRule[^\n]*https?://(?!%\{)|auto_(?:prepend|append)_file"
+    rb"|(?:AddHandler|AddType)[^\n]*php[^\n]*\.(?:jpe?g|png|gif|ico|txt|html?|css|js)\b",
+    re.IGNORECASE,
+)
+AUTO = re.compile(rb"auto_(?:prepend|append)_file", re.IGNORECASE)
 DB_PAT = r"<script|<iframe|eval[(]|base64_decode|document[.]write|fromCharCode"  # [(] not \( : SQL eats backslashes
-OK_HOSTS = ["googletagmanager.com", "google-analytics.com", "google.com", "googleapis.com", "gstatic.com",
-            "facebook.net", "facebook.com", "fbcdn.net", "cloudflare.com", "cdnjs.cloudflare.com",
-            "jsdelivr.net", "unpkg.com", "jquery.com", "youtube.com", "twitter.com", "wp.com", "wordpress.org", "w.org"]
-ODD_CRON = re.compile(r"eval|base64|shell|cmd|exec|http|^[a-z0-9]{10,}$", re.I)
+OK_HOSTS = [
+    "googletagmanager.com",
+    "google-analytics.com",
+    "google.com",
+    "googleapis.com",
+    "gstatic.com",
+    "facebook.net",
+    "facebook.com",
+    "fbcdn.net",
+    "cloudflare.com",
+    "cdnjs.cloudflare.com",
+    "jsdelivr.net",
+    "unpkg.com",
+    "jquery.com",
+    "youtube.com",
+    "twitter.com",
+    "wp.com",
+    "wordpress.org",
+    "w.org",
+]
+ODD_CRON = re.compile(r"eval|base64|shell|cmd|exec|http|^[a-z0-9]{10,}$", re.IGNORECASE)
 LOG_RE = re.compile(r'^(\S+) \S+ \S+ \[[^\]]+\] "(\S+) (\S+)[^"]*" (\d{3}) \S+ "[^"]*" "([^"]*)"')
-LOG_GLOBS = ["/var/log/nginx/access.log*", "/var/log/apache2/access.log*", "/var/log/httpd/access_log*",
-             "/var/log/apache2/*access*.log*", "/var/log/nginx/*access*.log*"]
-ATTACK = re.compile(r"\.\./|union\s+select|base64_|eval\(|cmd=|/etc/passwd|<script|wget%20|curl%20", re.I)
+LOG_GLOBS = [
+    "/var/log/nginx/access.log*",
+    "/var/log/apache2/access.log*",
+    "/var/log/httpd/access_log*",
+    "/var/log/apache2/*access*.log*",
+    "/var/log/nginx/*access*.log*",
+]
+ATTACK = re.compile(r"\.\./|union\s+select|base64_|eval\(|cmd=|/etc/passwd|<script|wget%20|curl%20", re.IGNORECASE)
 UPLOADS_HT = """# wpguard: never execute scripts from uploads
 <IfModule mod_authz_core.c>
   <FilesMatch "\\.(php\\d?|phtml|phar|inc)$">
@@ -121,22 +181,24 @@ def hash_match(p, db):
                 fh.seek(0)
                 if hashlib.file_digest(fh, algo).hexdigest() in known:
                     return algo
+    return None
 
 
 class Rep:
     """Per-site report. hits = things needing attention; log = readable transcript."""
-    def __init__(s, site):
-        s.site, s.lines, s.hits, s.files = str(site), [], [], {}
 
-    def log(s, *a):
+    def __init__(self, site):
+        self.site, self.lines, self.hits, self.files = str(site), [], [], {}
+
+    def log(self, *a):
         line = " ".join(map(str, a))
-        s.lines.append(line)
+        self.lines.append(line)
         if LIVE:
             print(line, flush=True)
 
-    def hit(s, kind, what, why):
-        s.hits.append({"kind": kind, "what": str(what), "why": why})
-        s.log(f"  [{kind}] {what}  <- {why}")
+    def hit(self, kind, what, why):
+        self.hits.append({"kind": kind, "what": str(what), "why": why})
+        self.log(f"  [{kind}] {what}  <- {why}")
 
 
 def selftest():
@@ -161,9 +223,16 @@ def setup():
 
 def wp(site, *a):
     # --skip-plugins/themes: never execute possibly infected code while cleaning
-    cmd = ["php", str(WP), f"--path={site}", "--skip-plugins", "--skip-themes",
-           *(["--allow-root"] if os.geteuid() == 0 else []), *a]
-    return subprocess.run(cmd, capture_output=True, text=True)
+    cmd = [
+        "php",
+        str(WP),
+        f"--path={site}",
+        "--skip-plugins",
+        "--skip-themes",
+        *(["--allow-root"] if os.geteuid() == 0 else []),
+        *a,
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, check=False)
 
 
 def jget(site, *a):
@@ -179,7 +248,7 @@ def get_json(url, headers=None):
             return r.status, json.load(r)
     except urllib.error.HTTPError as e:
         return e.code, None
-    except Exception:
+    except OSError, ValueError:
         return 0, None
 
 
@@ -216,6 +285,7 @@ def judge(name, ext, in_up, data, extra):
         return "php code in uploads"
     elif ext in PHP_EXT and (m := SIG.search(data) or (extra and extra.search(data))):
         return f"signature: {m.group(0)[:40]!r}"
+    return None
 
 
 def file_scan(site: Path, a, extra, rep):
@@ -236,13 +306,12 @@ def file_scan(site: Path, a, extra, rep):
                     hits[p] = "hidden file"
                     continue
                 bad, good = HASHDB["bad"], HASHDB["good"]
-                if bad or good:
-                    if size < 50_000_000:  # ponytail: hashes every file; narrow by ext if IO-bound
-                        if bad and (alg := hash_match(p, bad)):
-                            hits[p] = f"known-bad {alg} hash (hashdb)"
-                            continue
-                        if good and hash_match(p, good):
-                            continue
+                if (bad or good) and size < 50_000_000:  # ponytail: hashes every file; narrow by ext if IO-bound
+                    if bad and (alg := hash_match(p, bad)):
+                        hits[p] = f"known-bad {alg} hash (hashdb)"
+                        continue
+                    if good and hash_match(p, good):
+                        continue
                 if size > 5_000_000:  # ponytail: skips huge files; raise if shells hide in big blobs
                     continue
                 if f in (".htaccess", ".user.ini", "php.ini", "wp-config.php") or ext in PHP_EXT or in_up:
@@ -271,7 +340,7 @@ def checksum_extras(site: Path):
 
 
 def find_files(site, a, rep):
-    extra = re.compile("|".join(Path(a.sigs).read_text().split("\n")).encode(), re.I) if a.sigs else None
+    extra = re.compile("|".join(Path(a.sigs).read_text().split("\n")).encode(), re.IGNORECASE) if a.sigs else None
     return {**file_scan(site, a, extra, rep), **checksum_extras(site)}
 
 
@@ -291,7 +360,9 @@ def quarantine(site: Path, hits, qroot: Path, rep):
 
 def clamav(site, rep):
     if shutil.which("clamscan"):
-        r = subprocess.run(["clamscan", "-r", "-i", "--no-summary", str(site)], capture_output=True, text=True)
+        r = subprocess.run(
+            ["clamscan", "-r", "-i", "--no-summary", str(site)], capture_output=True, text=True, check=False
+        )
         for line in r.stdout.splitlines():
             rep.hit("clamav", *line.rsplit(": ", 1))
 
@@ -320,14 +391,31 @@ def db_clean(site, rep, dry):
     ]
     rep.log(f"== DB clean ({'DRY RUN, add --clean-db to apply' if dry else 'APPLYING'})")
     for pat in pats:
-        r = wp(site, "search-replace", pat, "", "--regex", "--regex-delimiter=#", "--regex-flags=is",
-               "--skip-columns=guid", "--report-changed-only", *(["--dry-run"] if dry else []))
+        r = wp(
+            site,
+            "search-replace",
+            pat,
+            "",
+            "--regex",
+            "--regex-delimiter=#",
+            "--regex-flags=is",
+            "--skip-columns=guid",
+            "--report-changed-only",
+            *(["--dry-run"] if dry else []),
+        )
         rep.log("  ", (r.stdout + r.stderr).strip().replace("\n", "\n   ") or "no matches")
 
 
 def persistence(site, rep, a):
     cut = time.time() - (a.since or 30) * 86400
-    for u in jget(site, "user", "list", "--role=administrator", "--fields=ID,user_login,user_email,user_registered", "--format=json"):
+    for u in jget(
+        site,
+        "user",
+        "list",
+        "--role=administrator",
+        "--fields=ID,user_login,user_email,user_registered",
+        "--format=json",
+    ):
         line = f"#{u['ID']} {u['user_login']} <{u['user_email']}> registered {u['user_registered']}"
         if datetime.fromisoformat(u["user_registered"]).timestamp() > cut:
             rep.hit("admin", line, "NEW administrator, verify (fix --delete-user ID)")
@@ -440,7 +528,7 @@ def snapshot(site: Path):
     return snap
 
 
-def baseline(site: Path, a):
+def baseline(site: Path, _a):
     rep = Rep(site)
     WP.parent.mkdir(parents=True, exist_ok=True)
     snap = snapshot(site)
@@ -455,12 +543,16 @@ def watch(site: Path, a):
         rep.log("no baseline yet: run `baseline` on a clean site")
         return rep
     old, new = json.loads(baseline_file(site).read_text()), snapshot(site)
-    extra = re.compile("|".join(Path(a.sigs).read_text().split("\n")).encode(), re.I) if a.sigs else None
-    for kind, rels in (("new", sorted(new.keys() - old.keys())),
-                       ("changed", sorted(r for r in new if r in old and new[r] != old[r]))):
+    extra = re.compile("|".join(Path(a.sigs).read_text().split("\n")).encode(), re.IGNORECASE) if a.sigs else None
+    for kind, rels in (
+        ("new", sorted(new.keys() - old.keys())),
+        ("changed", sorted(r for r in new if r in old and new[r] != old[r])),
+    ):
         for rel in rels:
             p = site / rel
-            why = judge(p.name, p.suffix.lower(), site / "wp-content/uploads" in p.parents, p.read_bytes()[:5_000_000], extra)
+            why = judge(
+                p.name, p.suffix.lower(), site / "wp-content/uploads" in p.parents, p.read_bytes()[:5_000_000], extra
+            )
             rep.hit(kind, rel, f"SIGNATURE MATCH: {why}" if why else "file differs from baseline")
     for rel in sorted(old.keys() - new.keys()):
         rep.hit("removed", rel, "file gone since baseline")
@@ -478,20 +570,48 @@ def reinstall(site, rep):
         rep.log(f"== reinstall + update {kind}s")
         for it in jget(site, kind, "list", "--format=json", "--fields=name"):
             ok = wp(site, kind, "install", it["name"], "--force").returncode == 0
-            rep.log(f"  {'ok  ' if ok else 'SKIP'} {it['name']}" + ("" if ok else "  (not on wp.org: reinstall from vendor)"))
+            rep.log(
+                f"  {'ok  ' if ok else 'SKIP'} {it['name']}"
+                + ("" if ok else "  (not on wp.org: reinstall from vendor)")
+            )
+
+
+def make_backup(site: Path, dest: Path, rep, *, uploads: bool = True) -> Path:
+    """db.sql + site files -> <dest>/wpguard-backup-<site>-<ts>.tar.zst plus .sha256 (tarfile zstd needs Python 3.14)."""
+    dest = dest.resolve()
+    if dest == site or site in dest.parents:
+        sys.exit("backup destination must be outside the site directory")
+    dest.mkdir(parents=True, exist_ok=True)
+    out = dest / f"wpguard-backup-{site.name}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.tar.zst"
+    skip = "site/wp-content/uploads"
+    with tempfile.TemporaryDirectory() as tmp:
+        sql = Path(tmp) / "db.sql"
+        r = wp(site, "db", "export", str(sql))
+        if r.returncode:
+            sys.exit(f"db export failed, aborting: {r.stderr.strip()}")
+        with tarfile.open(out, "x:zst") as t:  # "x": never overwrite an existing backup
+            t.add(sql, arcname="db.sql")
+            t.add(site, arcname="site", filter=lambda i: None if not uploads and i.name.startswith(skip) else i)
+    out.chmod(0o600)  # holds wp-config.php and the DB
+    with out.open("rb") as fh:
+        digest = hashlib.file_digest(fh, "sha256").hexdigest()
+    out.with_name(out.name + ".sha256").write_text(f"{digest}  {out.name}\n")
+    rep.log(f"  backup -> {out} ({out.stat().st_size // 1024} KiB, sha256 {digest[:12]}...)")
+    return out
+
+
+def backup(site: Path, a):
+    rep = Rep(site)
+    make_backup(site, Path(a.out) if a.out else site.parent, rep, uploads=not a.no_uploads)
+    return rep
 
 
 def fix(site: Path, a):
     rep = Rep(site)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    bak = site.parent / f"wpguard-backup-{site.name}-{ts}"
     qroot = site.parent / "wpguard-quarantine" / f"{site.name}-{ts}"
-    bak.mkdir(parents=True)
-    rep.log(f"== backup -> {bak}")
-    r = wp(site, "db", "export", str(bak / "db.sql"))
-    assert r.returncode == 0, f"db backup failed, aborting: {r.stderr}"
-    with tarfile.open(bak / "wp-content.tgz", "w:gz") as t:  # uploads excluded: can be huge
-        t.add(site / "wp-content", arcname="wp-content", filter=lambda i: None if "/uploads" in i.name else i)
+    rep.log("== backup (without uploads; run `backup` for a full one)")
+    bak = make_backup(site, site.parent, rep, uploads=False)
 
     scan(site, a, rep)
     quarantine(site, rep.files, qroot, rep)
@@ -508,23 +628,36 @@ def fix(site: Path, a):
     quarantine(site, left, qroot, rep)
     snap = snapshot(site)
     baseline_file(site).write_text(json.dumps(snap))
-    rep.log(f"\nDone. Backup: {bak}\nQuarantine: {qroot}\nBaseline saved ({len(snap)} files): use `watch` in cron.\n"
-            "Still manual: unknown admins, DB/FTP/hosting passwords, wp-config.php, find the entry hole (`logs`, VULN lines above).")
+    rep.log(
+        f"\nDone. Backup: {bak}\nQuarantine: {qroot}\nBaseline saved ({len(snap)} files): use `watch` in cron.\n"
+        "Still manual: unknown admins, DB/FTP/hosting passwords, wp-config.php, find the entry hole (`logs`, VULN lines above)."
+    )
     return rep
 
 
 def restore(site: Path, a):
     rep = Rep(site)
-    found = sorted(site.parent.glob(f"wpguard-backup-{site.name}-*"))
-    bak = Path(a.src) if a.src else (found[-1] if found else None)
-    if not bak or not bak.is_dir():
-        rep.log("no backup found (use --from DIR)")
+    found = sorted(site.parent.glob(f"wpguard-backup-{site.name}-*.tar.zst"))
+    arc = Path(a.src) if a.src else (found[-1] if found else None)
+    if not arc or not arc.is_file():
+        rep.log("no backup found (use --from FILE.tar.zst)")
         return rep
-    r = wp(site, "db", "import", str(bak / "db.sql"))
+    if (sidecar := arc.with_name(arc.name + ".sha256")).exists():
+        with arc.open("rb") as fh:
+            if hashlib.file_digest(fh, "sha256").hexdigest() != sidecar.read_text().split()[0]:
+                rep.log(f"CHECKSUM MISMATCH for {arc}, aborting")
+                return rep
+    with tempfile.TemporaryDirectory() as tmp, tarfile.open(arc, "r:zst") as t:
+        for m in t:
+            if m.name == "db.sql":
+                t.extract(m, tmp, filter="data")
+            elif m.name.startswith("site/"):
+                t.extract(m.replace(name=m.name.removeprefix("site/")), site, filter="data")
+        r = wp(site, "db", "import", f"{tmp}/db.sql")
     rep.log("db import:", (r.stdout + r.stderr).strip() or "ok")
-    with tarfile.open(bak / "wp-content.tgz") as t:
-        t.extractall(site, filter="data")
-    rep.log(f"wp-content restored from {bak}. Quarantined files stay in {site.parent}/wpguard-quarantine (move back by hand).")
+    rep.log(
+        f"files restored from {arc}. Quarantined files stay in {site.parent}/wpguard-quarantine (move back by hand)."
+    )
     return rep
 
 
@@ -547,18 +680,48 @@ def audit(site: Path, a):
     opt = lambda k: wp(site, "option", "get", k).stdout.strip()
     wpc = site / "wp-content"
     rep.data = {
-        "site": str(site), "generated": datetime.now().isoformat(timespec="seconds"), "tool": "wpguard",
+        "site": str(site),
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "tool": "wpguard",
         "wordpress": wp(site, "core", "version").stdout.strip(),
-        "php": subprocess.run(["php", "-r", "echo PHP_VERSION;"], capture_output=True, text=True).stdout,
-        "settings": {k: opt(k) for k in ("siteurl", "home", "blogname", "admin_email", "default_role",
-                                         "users_can_register", "permalink_structure", "WPLANG", "template", "stylesheet")},
+        "php": subprocess.run(["php", "-r", "echo PHP_VERSION;"], capture_output=True, text=True, check=False).stdout,
+        "settings": {
+            k: opt(k)
+            for k in (
+                "siteurl",
+                "home",
+                "blogname",
+                "admin_email",
+                "default_role",
+                "users_can_register",
+                "permalink_structure",
+                "WPLANG",
+                "template",
+                "stylesheet",
+            )
+        },
         "plugins": jget(site, "plugin", "list", "--format=json", "--fields=name,version,status,update"),
         "themes": jget(site, "theme", "list", "--format=json", "--fields=name,version,status,update"),
         "users": {"count": len(users), "by_role": dict(Counter(u["roles"] for u in users)), "list": users[:500]},
-        "cron_hooks": sorted({e["hook"] for e in jget(site, "cron", "event", "list", "--fields=hook", "--format=json")}),
+        "cron_hooks": sorted(
+            {e["hook"] for e in jget(site, "cron", "event", "list", "--fields=hook", "--format=json")}
+        ),
         "mu_plugins": sorted(f.name for f in (wpc / "mu-plugins").glob("*.php")),
-        "dropins": [n for n in ("advanced-cache.php", "object-cache.php", "db.php", "db-error.php", "maintenance.php", "sunrise.php") if (wpc / n).exists()],
-        "wp_config": cfg, "php_files": nphp, "findings": sc.hits,
+        "dropins": [
+            n
+            for n in (
+                "advanced-cache.php",
+                "object-cache.php",
+                "db.php",
+                "db-error.php",
+                "maintenance.php",
+                "sunrise.php",
+            )
+            if (wpc / n).exists()
+        ],
+        "wp_config": cfg,
+        "php_files": nphp,
+        "findings": sc.hits,
     }
     return rep
 
@@ -567,26 +730,46 @@ def md_table(rows, cols):
     if not rows:
         return "_none_\n"
     cell = lambda v: str(v).replace("|", "\\|").replace("\n", " ")
-    return "\n".join(["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols),
-                      *("| " + " | ".join(cell(r.get(c, "")) for c in cols) + " |" for r in rows)]) + "\n"
+    return (
+        "\n".join(
+            [
+                "| " + " | ".join(cols) + " |",
+                "|" + "---|" * len(cols),
+                *("| " + " | ".join(cell(r.get(c, "")) for c in cols) + " |" for r in rows),
+            ]
+        )
+        + "\n"
+    )
 
 
 def audit_md(d):
     kv = lambda m: md_table([{"key": k, "value": v} for k, v in m.items()], ["key", "value"])
     u = d["users"]
-    return "\n".join([
-        f"# WordPress audit: {d['site']}", f"_generated {d['generated']} by wpguard_\n",
-        f"## Overview\n\n- WordPress: {d['wordpress']}\n- PHP: {d['php']}\n- PHP files: {d['php_files']}\n"
-        f"- Findings: {len(d['findings'])}\n", "## Settings\n", kv(d["settings"]),
-        f"## Findings ({len(d['findings'])})\n", md_table(d["findings"], ["kind", "what", "why"]),
-        "## Plugins\n", md_table(d["plugins"], ["name", "version", "status", "update"]),
-        "## Themes\n", md_table(d["themes"], ["name", "version", "status", "update"]),
-        f"## Users ({u['count']}) by role: {u['by_role']}\n", md_table(u["list"], ["ID", "user_login", "user_email", "roles", "user_registered"]),
-        f"## Must-use plugins\n\n{', '.join(d['mu_plugins']) or '_none_'}\n",
-        f"## Drop-ins\n\n{', '.join(d['dropins']) or '_none_'}\n",
-        f"## Cron hooks ({len(d['cron_hooks'])})\n\n{', '.join(d['cron_hooks']) or '_none_'}\n",
-        "## wp-config.php constants (secrets redacted)\n", kv(d["wp_config"]),
-    ])
+    return "\n".join(
+        [
+            f"# WordPress audit: {d['site']}",
+            f"_generated {d['generated']} by wpguard_\n",
+            (
+                f"## Overview\n\n- WordPress: {d['wordpress']}\n- PHP: {d['php']}\n- PHP files: {d['php_files']}\n"
+                f"- Findings: {len(d['findings'])}\n"
+            ),
+            "## Settings\n",
+            kv(d["settings"]),
+            f"## Findings ({len(d['findings'])})\n",
+            md_table(d["findings"], ["kind", "what", "why"]),
+            "## Plugins\n",
+            md_table(d["plugins"], ["name", "version", "status", "update"]),
+            "## Themes\n",
+            md_table(d["themes"], ["name", "version", "status", "update"]),
+            f"## Users ({u['count']}) by role: {u['by_role']}\n",
+            md_table(u["list"], ["ID", "user_login", "user_email", "roles", "user_registered"]),
+            f"## Must-use plugins\n\n{', '.join(d['mu_plugins']) or '_none_'}\n",
+            f"## Drop-ins\n\n{', '.join(d['dropins']) or '_none_'}\n",
+            f"## Cron hooks ({len(d['cron_hooks'])})\n\n{', '.join(d['cron_hooks']) or '_none_'}\n",
+            "## wp-config.php constants (secrets redacted)\n",
+            kv(d["wp_config"]),
+        ]
+    )
 
 
 # ---------- access logs ----------
@@ -594,16 +777,21 @@ def logs(sites, a):
     rep = Rep("logs")
     paths = [Path(p) for p in a.log] or [Path(p) for g in LOG_GLOBS for p in sorted(glob.glob(g))]
     q = set()  # ponytail: assumes WP lives in the docroot, so rel path == URL path
-    for s in sites:
-        s = Path(s).resolve()
-        q |= {"/" + str(f.relative_to(d)) for d in (s.parent / "wpguard-quarantine").glob(f"{s.name}-*") for f in d.rglob("*") if f.is_file()}
+    for site in sites:
+        s = Path(site).resolve()
+        q |= {
+            "/" + str(f.relative_to(d))
+            for d in (s.parent / "wpguard-quarantine").glob(f"{s.name}-*")
+            for f in d.rglob("*")
+            if f.is_file()
+        }
     c = {k: Counter() for k in ("login", "xmlrpc", "attack", "plugin_post", "uploads_php", "quarantined")}
     for p in paths:
         with (gzip.open if p.suffix == ".gz" else open)(p, "rt", errors="replace") as fh:
             for line in fh:
                 if not (m := LOG_RE.match(line)):
                     continue
-                ip, meth, url, st, ua = m.groups()
+                ip, meth, url, st, _ua = m.groups()
                 path = url.split("?")[0]
                 if meth == "POST" and path.endswith("/wp-login.php"):
                     c["login"][ip] += 1
@@ -615,12 +803,21 @@ def logs(sites, a):
                     c["quarantined"][f"{ip} {meth} {path} -> {st}"] += 1
                 if "/wp-content/uploads/" in path and path.lower().endswith(tuple(PHP_EXT)):
                     c["uploads_php"][f"{ip} {meth} {path} -> {st}"] += 1
-                if meth == "POST" and re.search(r"/wp-content/(plugins|themes)/.+\.php$", path) and "admin-ajax" not in path:
+                if (
+                    meth == "POST"
+                    and re.search(r"/wp-content/(plugins|themes)/.+\.php$", path)
+                    and "admin-ajax" not in path
+                ):
                     c["plugin_post"][f"{path} -> {st}"] += 1
     rep.log(f"== logs: {len(paths)} files")
-    notes = {"login": "POST wp-login.php (brute force) by IP", "xmlrpc": "POST xmlrpc.php by IP",
-             "attack": "attack strings in URL by IP", "plugin_post": "direct POST to plugin/theme PHP (exploit entry point?)",
-             "uploads_php": "requests to PHP in uploads (shell use)", "quarantined": "requests to files you quarantined (WHO used the shell)"}
+    notes = {
+        "login": "POST wp-login.php (brute force) by IP",
+        "xmlrpc": "POST xmlrpc.php by IP",
+        "attack": "attack strings in URL by IP",
+        "plugin_post": "direct POST to plugin/theme PHP (exploit entry point?)",
+        "uploads_php": "requests to PHP in uploads (shell use)",
+        "quarantined": "requests to files you quarantined (WHO used the shell)",
+    }
     for k, title in notes.items():
         rep.log(f"-- {title}")
         for item, n in c[k].most_common(a.top):
@@ -737,11 +934,11 @@ DEFAULT_COLS = {
 INSERT_HEAD = re.compile(
     r"^(?:INSERT|REPLACE)(?:\s+IGNORE)?\s+INTO\s+(?:`[^`]+`\.)?`?([A-Za-z0-9_]+)`?\s*"
     r"(?:\((.*?)\)\s*)?VALUES\s*",
-    re.I | re.S,
+    re.IGNORECASE | re.DOTALL,
 )
 TABLE_HEAD = re.compile(
     r"^(?:INSERT|REPLACE)(?:\s+IGNORE)?\s+INTO\s+(?:`[^`]+`\.)?`?([A-Za-z0-9_]+)`?",
-    re.I,
+    re.IGNORECASE,
 )
 UNESCAPE = {
     "n": "\n",
@@ -798,7 +995,7 @@ def php_unser(raw) -> object:
 
     try:
         return val(0)[0]
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         return {}
 
 
@@ -824,7 +1021,7 @@ def get_url(url: str, retries: int = 3) -> bytes | None:
             if e.code == 404:
                 return None
             last = e
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001  any network/TLS failure just means retry
             last = e
         if i < retries - 1:
             print(f"    retry {i + 2}/{retries}  {url}")
@@ -864,7 +1061,7 @@ def open_dump(path: str):
         die(f"dump not found: {p}")
     if p.suffix == ".gz" or p.name.endswith(".sql.gz"):
         return gzip.open(p, "rt", encoding="utf-8", errors="replace")
-    return open(p, "r", encoding="utf-8", errors="replace")
+    return open(p, encoding="utf-8", errors="replace")
 
 
 def keep_table(name: str) -> bool:
@@ -931,24 +1128,23 @@ def iter_kept_inserts(fp):
                     esc = True
                 elif ch == "'":
                     in_str = False
-            else:
-                if ch == "'":
-                    in_str = True
-                elif ch == ";":
-                    stmt = "".join(buf).strip()
-                    reset()
-                    if stmt:
-                        yield stmt
-                    i += 1
-                    continue
-                elif not classified and len(buf) >= 80:
-                    head = "".join(buf[:240])
-                    t = classify_head(head)
-                    if t is not None:
-                        classified = True
-                        if not keep_table(t):
-                            skipping = True
-                            buf = []
+            elif ch == "'":
+                in_str = True
+            elif ch == ";":
+                stmt = "".join(buf).strip()
+                reset()
+                if stmt:
+                    yield stmt
+                i += 1
+                continue
+            elif not classified and len(buf) >= 80:
+                head = "".join(buf[:240])
+                t = classify_head(head)
+                if t is not None:
+                    classified = True
+                    if not keep_table(t):
+                        skipping = True
+                        buf = []
             i += 1
     tail = "".join(buf).strip()
     if tail:
@@ -1011,10 +1207,9 @@ def parse_rows(values_sql: str) -> list[list]:
                 i += 1
             if i >= n:
                 break
-            if values_sql.startswith("NULL", i) and (i + 4 == n or values_sql[i + 4] in ",)"):
-                row.append(None)
-                i += 4
-            elif values_sql.startswith("null", i) and (i + 4 == n or values_sql[i + 4] in ",)"):
+            if (values_sql.startswith("NULL", i) and (i + 4 == n or values_sql[i + 4] in ",)")) or (
+                values_sql.startswith("null", i) and (i + 4 == n or values_sql[i + 4] in ",)")
+            ):
                 row.append(None)
                 i += 4
             elif values_sql[i] == "'":
@@ -1058,7 +1253,16 @@ def parse_insert(stmt: str):
 
 
 class DumpWP:
-    def __init__(self, prefix: str, tables: set[str], options: dict, sitemeta: dict, users: list, usermeta: dict, blogs: list[int]):
+    def __init__(
+        self,
+        prefix: str,
+        tables: set[str],
+        options: dict,
+        sitemeta: dict,
+        users: list,
+        usermeta: dict,
+        blogs: list[int],
+    ):
         self.p = ident(prefix)
         self.tables = tables
         self.multisite = f"{self.p}blogs" in tables and f"{self.p}sitemeta" in tables
@@ -1081,9 +1285,7 @@ class DumpWP:
     def blog_prefixes(self) -> list[str]:
         if not self.multisite:
             return [self.p]
-        out = []
-        for bid in self._blogs or [1]:
-            out.append(self.p if int(bid) == 1 else f"{self.p}{int(bid)}_")
+        out = [self.p if int(bid) == 1 else f"{self.p}{int(bid)}_" for bid in self._blogs or [1]]
         return out or [self.p]
 
 
@@ -1134,7 +1336,8 @@ def load_dump(path: str, wanted_prefix: str) -> DumpWP:
                         sitemeta[k] = as_text(row[vi]) or ""
             elif kind == "users":
                 for row in rows:
-                    def col(n, default=None):
+
+                    def col(n, default=None, *, row=row, cmap=cmap):
                         i = cmap.get(n)
                         return row[i] if i is not None and i < len(row) else default
 
@@ -1162,11 +1365,8 @@ def load_dump(path: str, wanted_prefix: str) -> DumpWP:
                     continue
                 for row in rows:
                     if bi < len(row):
-                        try:
+                        with contextlib.suppress(TypeError, ValueError):
                             blogs.append(int(row[bi]))
-                        except (TypeError, ValueError):
-                            pass
-    prefixes = [p for p in options if p + "options" in tables or p in options]
     if wanted_prefix:
         ident(wanted_prefix)
         if wanted_prefix not in options and wanted_prefix + "options" not in tables:
@@ -1190,7 +1390,7 @@ def load_dump(path: str, wanted_prefix: str) -> DumpWP:
 def connect(a: argparse.Namespace):
     import pymysql
 
-    kw = dict(user=a.user, password=a.password, database=a.db, charset="utf8mb4")
+    kw = {"user": a.user, "password": a.password, "database": a.db, "charset": "utf8mb4"}
     if a.socket:
         kw["unix_socket"] = a.socket
     else:
@@ -1202,10 +1402,9 @@ def connect(a: argparse.Namespace):
         die(f"MySQL connect failed: {e}")
 
 
-def detect_prefix(cur, db: str, wanted: str) -> str:
+def detect_prefix(cur, db: str, wanted: str) -> str:  # noqa: RET503  die() exits
     cur.execute(
-        "SELECT table_name FROM information_schema.tables "
-        "WHERE table_schema=%s AND table_name LIKE %s",
+        "SELECT table_name FROM information_schema.tables WHERE table_schema=%s AND table_name LIKE %s",
         (db, "%options"),
     )
     names = [r[0] for r in cur.fetchall()]
@@ -1337,11 +1536,10 @@ def suspicious_paths(paths: list[str]) -> list[str]:
     for p in paths:
         s = p.lower()
         if (
-            (s.endswith(".php") and "/" not in s and s not in {"hello.php"})
+            (s.endswith(".php") and "/" not in s and s != "hello.php")
             or ".." in s
-            or s.startswith(("http://", "https://", "php://", "data:"))
+            or s.startswith(("http://", "https://", "php://", "data:", "wp-tmp", "tmp", "cache-"))
             or "/uploads/" in s
-            or s.startswith(("wp-tmp", "tmp", "cache-"))
             or re.search(r"[0-9a-f]{16,}", s)
         ):
             bad.append(p)
@@ -1357,12 +1555,18 @@ def db_audit(src) -> dict:
             for uid, key, val in src.usermeta.get(bp, []):
                 try:
                     user_id = int(uid)
-                except (TypeError, ValueError):
+                except TypeError, ValueError:
                     continue
                 if key == cap and "administrator" in (val or "").lower():
                     u = by_id.get(user_id, {"id": user_id, "login": "?", "email": "?", "registered": "?"})
                     report["admins"].append(
-                        {"prefix": bp, "id": u["id"], "login": u["login"], "email": u["email"], "registered": u["registered"]}
+                        {
+                            "prefix": bp,
+                            "id": u["id"],
+                            "login": u["login"],
+                            "email": u["email"],
+                            "registered": u["registered"],
+                        }
                     )
             for name, val in src.options.get(bp, {}).items():
                 low = name.lower()
@@ -1373,7 +1577,7 @@ def db_audit(src) -> dict:
                     report["malware_options"].append(name)
             cron = php_map(src.opt("cron", bp))
             hooks = []
-            for _ts, events in cron.items():
+            for events in cron.values():
                 if isinstance(events, dict):
                     hooks.extend(str(h) for h in events)
             report["cron_hooks"].extend(sorted(set(hooks))[:80])
@@ -1405,8 +1609,8 @@ def db_audit(src) -> dict:
                 f"OR option_name LIKE %s OR option_name LIKE %s LIMIT 80",
                 ("%updraft%", "%backup%", "%wpvivid%", "%ai1wm%", "%duplicator%"),
             )
-            for (n,) in rows:
-                n = as_text(n) or ""
+            for (raw,) in rows:
+                n = as_text(raw) or ""
                 if any(x in n.lower() for x in BACKUP_NEEDLES):
                     report["backup_options"].append(n)
         except pymysql.Error:
@@ -1424,7 +1628,7 @@ def db_audit(src) -> dict:
             pass
         cron = php_map(src.opt("cron", bp))
         hooks = []
-        for _ts, events in cron.items():
+        for events in cron.values():
             if isinstance(events, dict):
                 hooks.extend(str(h) for h in events)
         report["cron_hooks"].extend(sorted(set(hooks))[:80])
@@ -1537,8 +1741,8 @@ def fetch_zip(kind: str, slug: str, ver: str | None, dest: pathlib.Path) -> str:
         return "missing"
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        z.extractall(dest)
-    note = "" if status == "ok" else "  !! exact version not on src.org -> LATEST"
+        z.extractall(dest)  # noqa: S202  zipfile strips ../ and absolute paths
+    note = "" if status == "ok" else "  !! exact version not on wp.org -> LATEST"
     print(f"  {status:7} {kind:6} {slug} {ver or '?'}{note}")
     return status
 
@@ -1548,7 +1752,9 @@ def print_inventory(inv: dict, report: dict, plugins: dict, themes: dict, shady:
     print(f"home:      {inv['home'] or '?'}")
     print(f"name:      {inv['blogname'] or '?'}")
     print(f"prefix:    {inv['table_prefix']}   multisite={inv['multisite']}")
-    print(f"core:      {inv['wordpress'] or 'UNKNOWN'}   db_version={inv['db_version']}   hint={inv['db_version_hint'] or '?'}")
+    print(
+        f"core:      {inv['wordpress'] or 'UNKNOWN'}   db_version={inv['db_version']}   hint={inv['db_version_hint'] or '?'}"
+    )
     print(f"theme:     template={inv['template']}  stylesheet={inv['stylesheet']}")
     print(f"plugins:   {len(plugins)}")
     for path, ver in sorted(plugins.items()):
@@ -1582,7 +1788,9 @@ def print_inventory(inv: dict, report: dict, plugins: dict, themes: dict, shady:
 def recover_main(argv: list[str]) -> None:
     a = recover_args(argv)
     if not a.dump and (not a.db or not a.user):
-        die("need --db and --user, or --dump dump.sql\nexample:\n  uv run wpguard.py recover --dump /home/tmp-harmoniq.sql --db harmoniq --user dbuser --password 'PASS' --host mysql --out site --list")
+        die(
+            "need --db and --user, or --dump dump.sql\nexample:\n  uv run wpguard.py recover --dump /home/tmp-harmoniq.sql --db harmoniq --user dbuser --password 'PASS' --host mysql --out site --list"
+        )
 
     if a.dump:
         src = load_dump(a.dump, a.prefix)
@@ -1666,7 +1874,7 @@ def recover_main(argv: list[str]) -> None:
         blob = get_url(f"https://wordpress.org/wordpress-{core}.zip")
         core_label = core
         if not blob:
-            print(f"  {core} missing on src.org, trying latest.zip")
+            print(f"  {core} missing on wp.org, trying latest.zip")
             blob = get_url("https://wordpress.org/latest.zip")
             core_label = f"latest (wanted {core})"
     if not blob:
@@ -1710,9 +1918,15 @@ def wp_passthrough(argv):
     if not WP.exists() or not shutil.which("php"):
         sys.exit("run `setup` first and install php")
     site, *rest = argv
-    cmd = ["php", str(WP), f"--path={Path(site).resolve()}", *([] if unsafe else ["--skip-plugins", "--skip-themes"]),
-           *(["--allow-root"] if os.geteuid() == 0 else []), *rest]
-    sys.exit(subprocess.run(cmd).returncode)
+    cmd = [
+        "php",
+        str(WP),
+        f"--path={Path(site).resolve()}",
+        *([] if unsafe else ["--skip-plugins", "--skip-themes"]),
+        *(["--allow-root"] if os.geteuid() == 0 else []),
+        *rest,
+    ]
+    sys.exit(subprocess.run(cmd, check=False).returncode)
 
 
 def wpscan_passthrough(argv):
@@ -1726,11 +1940,13 @@ def wpscan_passthrough(argv):
     elif shutil.which("docker"):
         cmd = ["docker", "run", "--rm", *(["-it"] if sys.stdin.isatty() else []), "wpscanteam/wpscan", *argv]
     else:
-        sys.exit("WPScan not found. Install it: `gem install wpscan` (needs ruby) or docker. Free API token: https://wpscan.com/api")
+        sys.exit(
+            "WPScan not found. Install it: `gem install wpscan` (needs ruby) or docker. Free API token: https://wpscan.com/api"
+        )
     print("note: WPScan actively probes the target; only scan sites you own or may test.", file=sys.stderr)
     if not tok:
         print("note: no WPSCAN_TOKEN set -> free mode, no vulnerability data.", file=sys.stderr)
-    sys.exit(subprocess.run(cmd).returncode)
+    sys.exit(subprocess.run(cmd, check=False).returncode)
 
 
 # ---------- cli ----------
@@ -1740,7 +1956,9 @@ def write_report(path, reps):
         txt = json.dumps([{"site": r.site, "hits": r.hits, "log": r.lines} for r in reps], indent=1)
     elif ext == ".html":
         txt = "<meta charset=utf-8><title>wpguard</title><body style='font:14px monospace'>" + "".join(
-            f"<h2>{html.escape(r.site)} ({len(r.hits)} findings)</h2><pre>{html.escape(chr(10).join(r.lines))}</pre>" for r in reps)
+            f"<h2>{html.escape(r.site)} ({len(r.hits)} findings)</h2><pre>{html.escape(chr(10).join(r.lines))}</pre>"
+            for r in reps
+        )
     else:
         txt = "\n\n".join(f"### {r.site}\n" + "\n".join(r.lines) for r in reps)
     Path(path).write_text(txt)
@@ -1756,7 +1974,22 @@ def main():
     if sys.argv[1:2] == ["recover"]:
         return recover_main(sys.argv[2:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=["setup", "scan", "fix", "harden", "baseline", "watch", "logs", "restore", "audit", "recover"])
+    ap.add_argument(
+        "cmd",
+        choices=[
+            "setup",
+            "scan",
+            "fix",
+            "harden",
+            "baseline",
+            "watch",
+            "logs",
+            "restore",
+            "audit",
+            "backup",
+            "recover",
+        ],
+    )
     ap.add_argument("sites", nargs="*")
     ap.add_argument("--sites-file")
     ap.add_argument("-j", type=int, default=1)
@@ -1770,7 +2003,8 @@ def main():
     ap.add_argument("--hashdb-good", action="append", default=[])
     ap.add_argument("--url")
     ap.add_argument("--format", choices=["md", "json"])
-    ap.add_argument("--out")
+    ap.add_argument("--out", help="audit: output file; backup: destination directory")
+    ap.add_argument("--no-uploads", action="store_true")
     ap.add_argument("--lock", action="store_true")
     ap.add_argument("--prune", action="store_true")
     ap.add_argument("--delete-user", action="append")
@@ -1790,10 +2024,21 @@ def main():
     if a.cmd == "logs":
         reps = [logs(sites, a)]
     else:
-        fn = {"scan": scan, "fix": fix, "harden": harden, "baseline": baseline, "watch": watch, "restore": restore, "audit": audit}[a.cmd]
+        fn = {
+            "scan": scan,
+            "fix": fix,
+            "harden": harden,
+            "baseline": baseline,
+            "watch": watch,
+            "restore": restore,
+            "audit": audit,
+            "backup": backup,
+        }[a.cmd]
         if not sites:
             sys.exit("give at least one SITE path")
-        if a.cmd in ("scan", "fix", "harden", "restore", "audit") and (not WP.exists() or not shutil.which("php")):
+        if a.cmd in ("scan", "fix", "harden", "restore", "audit", "backup") and (
+            not WP.exists() or not shutil.which("php")
+        ):
             sys.exit("run `setup` first and install php")
         paths = [Path(s).resolve() for s in sites]
         bad = [p for p in paths if not (p / "wp-load.php").exists()]
@@ -1807,7 +2052,11 @@ def main():
     if a.cmd == "audit":
         fmt = a.format or ("json" if (a.out or "").endswith(".json") else "md")
         docs = [r.data for r in reps]
-        txt = json.dumps(docs[0] if len(docs) == 1 else docs, indent=1) if fmt == "json" else "\n\n".join(map(audit_md, docs))
+        txt = (
+            json.dumps(docs[0] if len(docs) == 1 else docs, indent=1)
+            if fmt == "json"
+            else "\n\n".join(map(audit_md, docs))
+        )
         if a.out:
             Path(a.out).write_text(txt)
             print("audit ->", a.out, file=sys.stderr)
@@ -1817,7 +2066,13 @@ def main():
         write_report(a.report, reps)
     bad = [r for r in reps if r.hits]
     if bad and a.notify and a.cmd in ("scan", "watch", "fix"):
-        notify("\n".join(f"{r.site}: {len(r.hits)} findings\n" + "\n".join(f"- [{h['kind']}] {h['what']}: {h['why']}" for h in r.hits[:15]) for r in bad))
+        notify(
+            "\n".join(
+                f"{r.site}: {len(r.hits)} findings\n"
+                + "\n".join(f"- [{h['kind']}] {h['what']}: {h['why']}" for h in r.hits[:15])
+                for r in bad
+            )
+        )
     sys.exit(1 if bad and a.cmd in ("scan", "watch") else 0)
 
 

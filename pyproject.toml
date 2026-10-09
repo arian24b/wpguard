@@ -1,0 +1,45 @@
+[project]
+name = "wpguard"
+version = "0.1.0"
+description = "Scan, clean, harden and monitor hacked WordPress sites with wp-cli"
+requires-python = ">=3.14"
+dependencies = ["pymysql"]
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = ["ruff"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "D",       # docstrings: internal CLI helpers, the module docstring is the manual
+    "ANN",     # type annotations: untyped single-file script
+    "T201",    # print: this is a CLI
+    "S101",    # assert: selftest() is built on asserts
+    "S603",    # subprocess: running wp-cli, php, docker and clamscan is the job
+    "S607",    # partial executable path (php, docker, uv) is resolved from PATH on purpose
+    "S608",    # SQL strings: only fixed constants and the validated table prefix are interpolated
+    "S310",    # urlopen: fixed https URLs only
+    "S324",    # sha1 only derives a baseline filename, not security
+    "E501",    # long SQL/doc/message strings cannot be wrapped by ruff format
+    "C901",    # complexity: long linear scan/fix flows
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917", "PLR2004",
+    "PTH",     # os.walk + Path mix is intentional
+    "DTZ",     # naive local timestamps are fine for names and report dates
+    "FBT",     # boolean args
+    "EM", "TRY003",  # exception message style
+    "E731",    # short lambdas as local helpers
+    "PLW0603", # LIVE global is set once in main()
+    "PLC0415", # pymysql is imported lazily, only for a live MySQL
+    "CPY001",  # no copyright header
+    "COM812", "ISC001",  # conflict with ruff format
+]
+
+[tool.ruff.format]
+quote-style = "double"

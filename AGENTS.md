@@ -10,7 +10,7 @@ Guidance for AI coding agents working in this repo. User-facing docs are in `REA
 
 - Keep everything in the single `wpguard.py`. No third-party dependencies beyond lazily imported `pymysql`; PHP serialized data is parsed by the built-in `php_unser`.
 - The `recover` section (after `# ---------- recover`) is self-contained: `recover_main(argv)` with its own argparse; names there are `src` (DB source), `db_audit`, `php_unser`.
-- State lives in `~/.local/share/wpguard/` (wp-cli.phar, `baseline-<sha1 of path>.json`). Backups/quarantine go next to the site (`wpguard-backup-*`, `wpguard-quarantine/`), never inside the web root.
+- State lives in `~/.local/share/wpguard/` (wp-cli.phar, `baseline-<sha1 of path>.json`). Backups (`wpguard-backup-<site>-<ts>.tar.zst` + `.sha256`, layout: `db.sql` and `site/...`; built by `make_backup`, used by `backup`, `fix`, `restore`) and quarantine (`wpguard-quarantine/`) go next to the site, never inside it. Backups use `tarfile` `x:zst`, which needs Python 3.14: the system `python3` may be older, so run things with `uv run`.
 
 ## Conventions
 
@@ -26,6 +26,10 @@ Guidance for AI coding agents working in this repo. User-facing docs are in `REA
 ## Pass-through commands
 
 `wp` and `wpscan` are dispatched at the top of `main()` before argparse, so every flag after them goes straight to wp-cli / WPScan (`wp_passthrough`, `wpscan_passthrough`). `wp` keeps `--skip-plugins --skip-themes` unless `--unsafe`. WPScan must stay an external tool (ruby gem or docker); do not vendor it. Hash databases: `load_hashdb` extracts md5/sha1/sha256 hex tokens from any text/gz/sqlite file by regex; `HASHDB["bad"|"good"]` is global state set in `main` and consumed in `file_scan`.
+
+## Lint / format
+
+`pyproject.toml` enables ruff `select = ["ALL"]` with a documented ignore list. Before finishing any change run `uv run ruff check .` and `uv run ruff format .` (both must be clean). Fix findings rather than extending the ignore list; use a targeted `# noqa: CODE  reason` only when the rule is wrong for that line. ruff formats `except A, B:` without parentheses (valid on 3.14).
 
 ## Testing
 
