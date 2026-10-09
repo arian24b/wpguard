@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v0.3.0 (2026-10-09)
+
+### Features
+
+- **cli**: One-line --help with short info for every command and option
+  ([`41e3af4`](https://github.com/arian24b/wpguard/commit/41e3af40203c5ed2b2867e36bcb23d8285595581))
+
+
 ## v0.2.1 (2026-10-09)
 
 ### Bug Fixes
