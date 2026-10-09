@@ -14,7 +14,8 @@
 uvx wpguard --help                 # اجرا بدون نصب (uv خودش پایتون ۳.۱۴ را می‌گیرد)
 uv tool install wpguard            # یا: pipx install wpguard
 pip install 'wpguard[s3]'          # بکاپ روی S3   |   'wpguard[mysql]' برای recover روی MySQL زنده
-wpguard setup                      # دانلود wp-cli (با بررسی sha512) در ~/.local/share/wpguard
+wpguard setup                      # دانلود wp-cli (با بررسی sha512) و ساخت ~/.config/wpguard/wpguard.toml
+wpguard init                       # (اختیاری) ساخت ./wpguard.toml نمونه برای همین پروژه
 ```
 
 پیش‌نیاز: لینوکس، `php` و کلاینت MySQL/MariaDB برای دستورهای سایت (نه برای `baseline`، `watch`، `logs`، `verify`). با **کاربر مالک فایل‌های سایت** اجرا کنید (`sudo -u www-data wpguard ...`). ابزارهای اختیاری که در صورت وجود استفاده می‌شوند: `yara` (یا `yr`)، `clamscan`، `age`، `rsync`، `ssh`، `wpscan`/docker.
@@ -31,7 +32,7 @@ wpguard baseline /var/www/site                   # عکس‌برداری از و
 wpguard schedule add watch /var/www/site --every 15m --install    # هشدار با هر تغییر
 ```
 
-`SITE` می‌تواند مسیر، **نام پروفایل** در `wpguard.toml` یا **`host:/path`** (اجرا از طریق ssh) باشد.
+`SITE` می‌تواند مسیر، **نام پروفایل** در `wpguard.toml`، **نام میزبان (hostname)** مثل `blog.example.com` یا **`host:/path`** / **`host:domain`** (اجرا از طریق ssh) باشد.
 
 ## دستورها
 
@@ -55,11 +56,13 @@ wpguard schedule add watch /var/www/site --every 15m --install    # هشدار �
 | `wp [--unsafe] SITE ARGS...` | اجرای **هر** دستور wp-cli (افزونه‌ها و پوسته‌ها بارگذاری نمی‌شوند مگر با `--unsafe`) |
 | `wpscan [URL] ARGS...` | اجرای خود [WPScan](https://wpscan.com/) (برنامه محلی یا docker)؛ `WPSCAN_TOKEN` به‌صورت `--api-token` اضافه می‌شود |
 | `recover ARGS...` | بازسازی سایت پاک‌شده از دیتابیس یا dump (`recover --help`) |
-| `setup` | دانلود wp-cli |
+| `setup` | دانلود wp-cli و ساخت `~/.config/wpguard/wpguard.toml` اگر config وجود نداشته باشد |
+| `init` | ساخت `./wpguard.toml` نمونه با کامنت (یا `--config FILE`؛ `--force` بازنویسی می‌کند) |
+| `discover [HOST...]` | پیدا کردن سایت‌های وردپرس با hostname روی همین ماشین یا هاست‌های ssh؛ `--save` آن‌ها را به config اضافه می‌کند |
 
 ## فایل پیکربندی و پروفایل‌ها
 
-`wpguard.toml` (در `./` سپس `~/.config/wpguard/` جست‌وجو می‌شود، یا `--config FILE`؛ نمونه: `wpguard.example.toml`):
+`wpguard setup` (سراسری، `~/.config/wpguard/wpguard.toml`) یا `wpguard init` (همین پوشه) یک فایل نمونه با کامنت می‌سازد و `wpguard discover --save` سایت‌ها را خودش اضافه می‌کند. فایل در `./` سپس `~/.config/wpguard/` جست‌وجو می‌شود، یا `--config FILE`:
 
 ```toml
 [defaults]
@@ -85,6 +88,19 @@ path = "/var/www/mina"            # مسیر روی سرور راه دور
 - `fix` به‌جای «آخرین نسخه»، **نسخه‌های قفل‌شده** را نصب می‌کند (بدون جهش ناگهانی نسخه هنگام پاکسازی)،
 - `lock --check` هنگام انحراف (افزونه جدید، تغییر نسخه، تغییر فید) کد خروج ۱ می‌دهد: برای cron عالی است،
 - `updates --apply` قفل موارد به‌روزشده را تازه می‌کند.
+
+## سایت با hostname
+
+هر دستور سایت به‌جای مسیر، **نام میزبان** سایت را هم می‌پذیرد:
+
+```bash
+wpguard discover                         # فهرست سایت‌های وردپرس همین ماشین (vhost های nginx/apache + wp-config.php)
+wpguard discover mina --save             # همین کار روی هاست ssh به نام mina و افزودن به wpguard.toml
+wpguard scan blog.example.com            # با hostname (از domain/url پروفایل، یا از vhost های همین ماشین)
+wpguard backup mina:blog.example.com     # hostname روی هاست ssh: مسیر از طریق ssh پیدا می‌شود و دستور همان‌جا اجرا می‌شود
+```
+
+ترتیب تشخیص `SITE`: نام پروفایل ← host مربوط به `domain`/`url` پروفایل ← `host:/path` ← `host:domain` ← مسیر محلیِ موجود ← دامنه‌ای که در تنظیمات وب‌سرور همین ماشین پیدا شود. اگر پروفایل `domain` داشته باشد می‌تواند `path` نداشته باشد (و اختیاراً `ssh`)؛ مسیر از روی vhost ها پیدا می‌شود. Discovery فایل‌های `/etc/nginx`، `/etc/apache2`، `/etc/httpd` (`server_name`/`ServerName`/`ServerAlias` به‌علاوه `root`/`DocumentRoot`) و `wp-config.php` زیر `/var/www /srv /home /opt` را می‌خواند؛ چینش‌های غیرعادی را می‌توان دستی ثبت کرد. نسخه‌های `www.` هم تطبیق داده می‌شوند.
 
 ## سایت‌های راه دور با SSH
 

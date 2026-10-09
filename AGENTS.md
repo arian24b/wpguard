@@ -11,7 +11,8 @@ Guidance for AI coding agents working in this repo. User-facing docs: `README.md
 | Module | Role |
 |---|---|
 | `cli.py` | argparse, config/profile merging (`apply_opts`), local vs ssh dispatch (`run_target`), exit codes, report/notify. `wp`, `wpscan`, `recover` are dispatched before argparse |
-| `config.py` | `wpguard.toml` (`Config`, `Target`, `resolve`: profile name, `host:/path`, or local path) |
+| `config.py` | `wpguard.toml` (`Config`, `Target`, `resolve`: profile name → profile hostname → `host:/path` → `host:domain` → local path → bare domain), `TEMPLATE` + `write_template`/`ensure_default` used by `init`/`setup` (the only copy of the starter config; there is no example file) |
+| `discover.py` | hostname → site path: parse nginx/apache vhosts + `wp-config.php` locations (locally or over ssh, one cached round trip per host), `fill(Target)`, the `discover` command and `--save` |
 | `lockfile.py` | `wpguard.lock` (pins + feed digests), `lock` command, `pinned(a)` used by `fix`/`updates` |
 | `remote.py` | `ssh HOST "<remote_cmd> <argv>"`, `--pull` via rsync |
 | `wpcli.py` / `wpscan.py` / `recovery.py` | handlers: wp-cli (download/run/pass-through), WPScan (API + CLI), recovery from DB/dump |

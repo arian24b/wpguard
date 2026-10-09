@@ -7,7 +7,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from wpguard import __version__, config, feeds, remote, wpcli, wpscan
+from wpguard import __version__, config, discover, feeds, remote, wpcli, wpscan
 from wpguard.audit import audit, audit_md
 from wpguard.backup import backup, restore, verify
 from wpguard.diffs import diff
@@ -22,10 +22,12 @@ from wpguard.updates import updates
 
 DOC = """wpguard: scan, clean, harden, back up and monitor hacked WordPress sites with wp-cli.
 
-site commands (SITE = path, profile name from wpguard.toml, or host:/path over ssh):
+site commands (SITE = path, profile name, hostname like blog.example.com, host:/path or host:domain over ssh):
   scan  fix  harden  undo  baseline  watch  backup  verify  restore  audit  diff  lock  updates
 other commands:
-  setup                      download wp-cli (sha512 verified)
+  setup                      download wp-cli (sha512 verified) and create ~/.config/wpguard/wpguard.toml
+  init [--config FILE]       create a starter ./wpguard.toml (--force to overwrite)
+  discover [HOST...] [--save]  find WordPress sites by hostname on this machine / ssh hosts (nginx, apache vhosts)
   logs [SITE...]             find the entry point in web server access logs
   sigs list|update [NAME..]  signature feeds (maldet hashes, YARA rules)
   schedule add|remove|show JOB SITE   cron / systemd timers (JOB: watch backup scan sigs updates)
@@ -42,17 +44,19 @@ SITE_CMDS: dict[str, Callable] = {
 FAIL_ON_HITS = {"scan", "watch", "lock", "verify", "diff", "updates"}
 NOTIFY_ON = {*FAIL_ON_HITS, "fix"}
 LOCAL_WP_CMDS = {"scan", "fix", "harden", "restore", "audit", "backup", "diff", "lock", "updates", "undo"}
-LOCAL_ONLY = {"config", "report", "sites_file", "jobs", "pull", "all", "help", "version"}
+LOCAL_ONLY = {"config", "report", "sites_file", "jobs", "pull", "all", "help", "version", "force", "save"}
 
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="wpguard", description=DOC, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=[*SITE_CMDS, "logs", "setup", "sigs", "schedule"])
-    ap.add_argument("sites", nargs="*", help="paths, profile names or host:/path")
+    ap.add_argument("cmd", choices=[*SITE_CMDS, "logs", "setup", "init", "discover", "sigs", "schedule"])
+    ap.add_argument("sites", nargs="*", help="paths, profile names, hostnames, host:/path or host:domain")
     ap.add_argument("--version", action="version", version=f"wpguard {__version__}")
     g = ap.add_argument_group("general")
     g.add_argument("--config", help="wpguard.toml (default: ./wpguard.toml, ~/.config/wpguard/wpguard.toml)")
     g.add_argument("--all", action="store_true", help="every site profile in the config")
+    g.add_argument("--force", action="store_true", help="(init, setup) overwrite / re-download")
+    g.add_argument("--save", action="store_true", help="(discover) add the found sites to the config")
     g.add_argument("--sites-file")
     g.add_argument("-j", "--jobs", type=int, default=1)
     g.add_argument("--report", help="write report: out.json | out.html | out.txt")
@@ -172,16 +176,30 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     ap = build_parser()
     ns = ap.parse_args(argv)
+    if ns.cmd == "init":
+        path = Path(ns.config) if ns.config else Path("wpguard.toml")
+        if config.write_template(path, force=ns.force):
+            print(f"created {path.resolve()}  (edit it, then try: wpguard discover --save)")
+            return 0
+        print(f"{path} already exists (use --force to overwrite)")
+        return 1
+    if ns.cmd == "setup":
+        wpcli.setup()
+        if created := config.ensure_default():
+            print(f"created {created}  (edit it, or run: wpguard discover --save)")
+        return 0
     try:
         cfg = config.load(ns.config)
     except config.ConfigError as e:
         sys.exit(f"error: {e}")
-    if ns.cmd == "setup":
-        wpcli.setup()
-        return 0
     if ns.cmd == "sigs":
         return feeds.sigs_cmd(ns.sites, cfg.feeds)
     ns.config_path = cfg.path
+    if ns.cmd == "discover":
+        try:
+            return discover.discover(ns.sites, cfg, cfg.path, save=ns.save)
+        except config.ConfigError as e:
+            sys.exit(f"error: {e}")
     if ns.cmd == "schedule":
         ns.site_key = ""
         rep = schedule(ns.sites, ns)
@@ -198,6 +216,9 @@ def main(argv: list[str] | None = None) -> int:
             sys.exit("fix with -j > 1 cannot ask for confirmation: add --yes (or use --dry-run)")
         try:
             targets = config.targets(cfg, ns.sites, every=ns.all)
+            for t in targets:
+                if not t.path:
+                    discover.fill(t)  # hostname-only target: find its path from the vhosts
             if ns.cmd in LOCAL_WP_CMDS and any(not t.ssh for t in targets):
                 wpcli.need_wp()
             bad = [t.path for t in targets if not t.ssh and not (Path(t.path) / "wp-load.php").exists()]

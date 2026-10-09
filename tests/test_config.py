@@ -110,3 +110,25 @@ def test_ssh_host_cannot_look_like_an_ssh_option(tmp_path):
         config.resolve(cfg, "x")
     with pytest.raises(config.ConfigError, match="not a valid host"):
         config.resolve(config.Config(), "-oProxyCommand=evil:/var/www")
+
+
+def test_template_is_valid_toml_and_changes_nothing(tmp_path):
+    p = tmp_path / "wpguard.toml"
+    assert config.write_template(p) is True
+    assert config.write_template(p) is False  # never overwrites by default
+    cfg = config.load(str(p))
+    assert (cfg.sites, cfg.defaults, cfg.feeds) == ({}, {}, {})  # everything is commented out
+    p.write_text("custom")
+    assert config.write_template(p, force=True) is True
+    assert p.read_text() == config.TEMPLATE
+
+
+def test_ensure_default_creates_global_only_when_no_config(tmp_path, monkeypatch):
+    local, global_ = tmp_path / "wpguard.toml", tmp_path / "cfg/wpguard.toml"
+    monkeypatch.setattr(config, "SEARCH", (local, global_))
+    assert config.ensure_default() == global_
+    assert global_.exists()
+    global_.unlink()
+    local.write_text("")
+    assert config.ensure_default() is None  # a config already exists: do nothing
+    assert not global_.exists()

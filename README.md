@@ -12,7 +12,8 @@ Command line tool to scan, clean, harden, back up and monitor hacked WordPress s
 uvx wpguard --help                 # run without installing (uv downloads Python 3.14 if needed)
 uv tool install wpguard            # or: pipx install wpguard
 pip install 'wpguard[s3]'          # S3 backups (boto3)   |   'wpguard[mysql]' for `recover` against a live MySQL
-wpguard setup                      # downloads wp-cli (sha512 verified) to ~/.local/share/wpguard
+wpguard setup                      # downloads wp-cli (sha512 verified) and creates ~/.config/wpguard/wpguard.toml
+wpguard init                       # (optional) starter ./wpguard.toml for this project
 ```
 
 Requirements: Linux, `php` and a MySQL/MariaDB client for the site commands (not for `baseline`, `watch`, `logs`, `verify`). Run as the **site's file owner** (`sudo -u www-data wpguard ...`) so new files keep the right ownership. Optional tools it uses when present: `yara` (or YARA-X `yr`), `clamscan`, `age`, `rsync`, `ssh`, `wpscan`/docker.
@@ -29,7 +30,7 @@ wpguard baseline /var/www/site                   # snapshot the clean state
 wpguard schedule add watch /var/www/site --every 15m --install    # alert on any change
 ```
 
-`SITE` can be a path, a **profile name** from `wpguard.toml`, or **`host:/path`** to run it over ssh (see below).
+`SITE` can be a path, a **profile name** from `wpguard.toml`, a **hostname** (`blog.example.com`), or **`host:/path`** / **`host:domain`** to run it over ssh (see below).
 
 ## Commands
 
@@ -53,11 +54,13 @@ wpguard schedule add watch /var/www/site --every 15m --install    # alert on any
 | `wp [--unsafe] SITE ARGS...` | run **any** wp-cli command (plugins/themes not loaded unless `--unsafe`) |
 | `wpscan [URL] ARGS...` | run the real [WPScan](https://wpscan.com/) (local binary or docker); `WPSCAN_TOKEN` becomes `--api-token` |
 | `recover ARGS...` | rebuild a wiped site from the DB or a dump (`recover --help`) |
-| `setup` | download wp-cli |
+| `setup` | download wp-cli and create `~/.config/wpguard/wpguard.toml` if no config exists |
+| `init` | create a commented starter `./wpguard.toml` (or `--config FILE`; `--force` overwrites) |
+| `discover [HOST...]` | find WordPress sites by hostname on this machine or ssh hosts; `--save` adds them to the config |
 
 ## Config file and profiles
 
-`wpguard.toml` (searched in `./` then `~/.config/wpguard/`, or `--config FILE`; see `wpguard.example.toml`):
+`wpguard setup` (global, `~/.config/wpguard/wpguard.toml`) or `wpguard init` (this directory) writes a commented starter file; `wpguard discover --save` fills in sites for you. It is searched in `./` then `~/.config/wpguard/`, or use `--config FILE`:
 
 ```toml
 [defaults]
@@ -83,6 +86,19 @@ Now `wpguard scan blog`, `wpguard backup --all`, `wpguard fix mina --dry-run` wo
 - `fix` reinstalls the **pinned** versions instead of "latest" (no surprise major jumps while cleaning),
 - `lock --check` exits 1 when something drifted (new plugin, version changed, feed changed): a good cron job,
 - `updates --apply` refreshes the pins for the updates it applied.
+
+## Sites by hostname
+
+Any site command accepts the site's **hostname** instead of its path:
+
+```bash
+wpguard discover                         # list WordPress sites on this machine (nginx/apache vhosts + wp-config.php)
+wpguard discover mina --save             # same on the ssh host `mina`, and add them to wpguard.toml
+wpguard scan blog.example.com            # by hostname (profile `domain`/`url`, or found from this machine's vhosts)
+wpguard backup mina:blog.example.com     # hostname on an ssh host: path is looked up over ssh, then the command runs there
+```
+
+Resolution order for `SITE`: profile name → profile `domain`/`url` host → `host:/path` → `host:domain` → an existing local path → a bare domain looked up in this machine's web-server configs. A profile may omit `path` when it has a `domain` (and optionally `ssh`): the path is then found from the vhosts. Discovery reads `/etc/nginx`, `/etc/apache2`, `/etc/httpd` (`server_name`/`ServerName`/`ServerAlias` + `root`/`DocumentRoot`) and `wp-config.php` under `/var/www /srv /home /opt`; unusual layouts can still be registered by hand. `www.` variants match.
 
 ## Remote sites over SSH
 

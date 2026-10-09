@@ -117,3 +117,24 @@ def test_notify_called_on_findings(site, fake_wp, monkeypatch):
     (site / "wp-content/uploads/a.php").write_text("<?php")
     cli.main(["scan", str(site), "--no-net", "--no-feeds", "--notify"])
     assert "a.php" in sent[0]
+
+
+def test_init_creates_a_starter_config(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["init"]) == 0
+    assert (tmp_path / "wpguard.toml").read_text().startswith("# wpguard configuration")
+    assert cli.main(["init"]) == 1  # exists
+    assert "already exists" in capsys.readouterr().out
+    assert cli.main(["init", "--force"]) == 0
+    assert cli.main(["init", "--config", str(tmp_path / "sub/other.toml")]) == 0
+
+
+def test_setup_downloads_wpcli_and_creates_default_config(tmp_path, monkeypatch):
+    from wpguard import config, wpcli
+
+    downloaded = []
+    monkeypatch.setattr(wpcli, "setup", lambda: downloaded.append(True))
+    monkeypatch.setattr(config, "SEARCH", (tmp_path / "no.toml", tmp_path / "cfg/wpguard.toml"))
+    assert cli.main(["setup"]) == 0
+    assert downloaded
+    assert (tmp_path / "cfg/wpguard.toml").exists()

@@ -46,7 +46,7 @@ path = "src/wpguard/__init__.py"
 packages = ["src/wpguard"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/wpguard", "tests", "README.md", "README.fa.md", "LICENSE", "wpguard.example.toml"]
+include = ["src/wpguard", "tests", "README.md", "README.fa.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
