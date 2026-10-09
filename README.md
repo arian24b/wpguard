@@ -169,7 +169,7 @@ uv run pytest
 uv build
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) runs ruff, pytest and a wheel smoke test on every push and pull request. Pushing a `v*` tag runs `release.yml` and publishes to PyPI through trusted publishing (configure the publisher once on pypi.org).
+GitHub Actions (`.github/workflows/ci.yml`) runs ruff, pytest and a wheel smoke test on every push and pull request. When CI succeeds on `main`, `release.yml` runs [python-semantic-release](https://python-semantic-release.readthedocs.io/): it reads [Conventional Commits](https://www.conventionalcommits.org/) (`feat:` → minor, `fix:` → patch, `feat!:` / `BREAKING CHANGE:` → major), bumps `__version__` and `uv.lock`, updates `CHANGELOG.md`, tags `vX.Y.Z`, creates the GitHub release and publishes the built package to PyPI (trusted publishing: add a publisher for this repo, workflow `release.yml`, environment `pypi` on pypi.org once). Commits without a releasable type (`docs:`, `chore:`, `ci:`, `test:`) do not release.
 
 ## What it does NOT do
 

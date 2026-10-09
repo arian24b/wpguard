@@ -1,34 +1,61 @@
 name: Release
 
-# Publish to PyPI when a version tag is pushed (git tag v0.2.0 && git push --tags).
-# One-time setup: on pypi.org add a "trusted publisher" for this repo + workflow + the `pypi` environment.
+# Versioning: python-semantic-release reads Conventional Commits on main (feat: -> minor, fix: -> patch,
+# feat!: / BREAKING CHANGE -> major while < 1.0 it stays minor), bumps __version__ + uv.lock, writes CHANGELOG.md,
+# tags vX.Y.Z and creates the GitHub release. When a release was made, the freshly built dist/ goes to PyPI.
+# One-time setup on pypi.org: add a trusted publisher (this repo, workflow "release.yml", environment "pypi").
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+  workflow_run:
+    workflows: ["CI"]
+    branches: [main]
+    types:
+      - completed
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  id-token: write
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: astral-sh/setup-uv@v6
-      - run: uv sync --locked
-      - run: uv run ruff check . && uv run ruff format --check . && uv run pytest
-      - run: uv build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-  publish:
-    needs: build
+  release:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     environment: pypi
-    permissions:
-      id-token: write
+
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
         with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@release/v1
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_branch || github.ref }}
+
+      - name: Set up UV
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: 3.14
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Configure Git
+        run: |
+          git config user.name ${{ github.actor }}
+          git config user.email ${{ github.actor }}@users.noreply.github.com
+
+      - name: Run semantic release
+        id: release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          before=$(git rev-parse HEAD)
+          uvx --from python-semantic-release==10.6.2 python-semantic-release version --changelog --tag
+          if [ "$before" != "$(git rev-parse HEAD)" ]; then echo "released=true" >> "$GITHUB_OUTPUT"; fi
+
+      # dist/ was built by semantic-release's build_command (pyproject.toml) from the bumped version
+      - name: Publish to PyPI
+        if: steps.release.outputs.released == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1

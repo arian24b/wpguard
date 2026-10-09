@@ -89,3 +89,15 @@ ignore = [
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.semantic_release]
+version_variables = ["src/wpguard/__init__.py:__version__"]
+tag_format = "v{version}"
+commit_parser = "conventional"
+allow_zero_version = true
+major_on_zero = false
+# bump uv.lock (it records the project version, CI syncs with --locked) and build dist/ for the PyPI upload
+build_command = "uv lock --upgrade-package wpguard && git add uv.lock && uv build"
+
+[tool.semantic_release.branches.main]
+match = "main"

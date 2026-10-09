@@ -49,7 +49,7 @@ Dependency direction: `cli` imports everything; command modules import `wpcli`, 
 
 ## CI / release
 
-`.github/workflows/ci.yml`: ruff check + format check, pytest, build + wheel smoke test. `release.yml`: on a `v*` tag, test, build, publish to PyPI with trusted publishing (environment `pypi`). Bump `__version__` in `src/wpguard/__init__.py` (hatch reads it) before tagging.
+`.github/workflows/ci.yml`: ruff check + format check, pytest, build + wheel smoke test. `release.yml` runs after CI succeeds on `main`: python-semantic-release (config in `[tool.semantic_release]`) bumps `__version__` (hatch reads it) and `uv.lock`, writes `CHANGELOG.md`, tags `vX.Y.Z`, makes the GitHub release; if it released, the `dist/` built by its `build_command` is published to PyPI (trusted publishing, environment `pypi`). **Never bump the version by hand.** Use Conventional Commit messages (`feat:`, `fix:`, `feat!:`, and `docs:`/`chore:`/`ci:`/`test:`/`refactor:` for non-releasing changes) so versions come out right. PSR needs the baseline tag `v0.2.0` to exist on the remote (`git push --tags`).
 
 ## Safety
 

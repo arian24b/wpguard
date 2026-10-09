@@ -171,7 +171,7 @@ uv run pytest
 uv build
 ```
 
-GitHub Actions (`.github/workflows/ci.yml`) با هر push و pull request ابزار ruff، pytest و یک smoke test از wheel را اجرا می‌کند. push کردن تگ `v*` فایل `release.yml` را اجرا و با trusted publishing روی PyPI منتشر می‌کند (publisher را یک بار در pypi.org تنظیم کنید).
+GitHub Actions (`.github/workflows/ci.yml`) با هر push و pull request ابزار ruff، pytest و یک smoke test از wheel را اجرا می‌کند. وقتی CI روی `main` موفق شود، `release.yml` ابزار [python-semantic-release](https://python-semantic-release.readthedocs.io/) را اجرا می‌کند: [Conventional Commits](https://www.conventionalcommits.org/) را می‌خواند (`feat:` ← minor، `fix:` ← patch، `feat!:` یا `BREAKING CHANGE:` ← major)، `__version__` و `uv.lock` را بالا می‌برد، `CHANGELOG.md` را به‌روز می‌کند، تگ `vX.Y.Z` و GitHub release می‌سازد و پکیج ساخته‌شده را روی PyPI منتشر می‌کند (trusted publishing: یک بار در pypi.org یک publisher برای این repo، workflow به نام `release.yml` و environment به نام `pypi` اضافه کنید). commitهای بدون نوع قابل‌انتشار (`docs:`، `chore:`، `ci:`، `test:`) نسخه جدید نمی‌سازند.
 
 ## محدودیت‌ها
 
