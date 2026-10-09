@@ -8,6 +8,7 @@ Everything lives in one file, `wpguard.py`. It uses only the standard library, e
 
 ## Requirements
 
+- Python **3.14** (pinned in `.python-version`; `uv` downloads it automatically, the system Python is not used)
 - Linux, `uv`, `php`, MySQL/MariaDB client on `PATH` (`baseline`, `watch`, `logs` need none of php/mysql)
 - Run as the **site's file owner** (`sudo -u www-data ...`) so new files get correct ownership
 - Shell access to the site's files and DB

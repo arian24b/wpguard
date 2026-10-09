@@ -10,7 +10,7 @@ Guidance for AI coding agents working in this repo. User-facing docs are in `REA
 
 - Keep everything in the single `wpguard.py`. No third-party dependencies beyond lazily imported `pymysql`; PHP serialized data is parsed by the built-in `php_unser`.
 - The `recover` section (after `# ---------- recover`) is self-contained: `recover_main(argv)` with its own argparse; names there are `src` (DB source), `db_audit`, `php_unser`.
-- State lives in `~/.local/share/wpguard/` (wp-cli.phar, `baseline-<sha1 of path>.json`). Backups (`wpguard-backup-<site>-<ts>.tar.zst` + `.sha256`, layout: `db.sql` and `site/...`; built by `make_backup`, used by `backup`, `fix`, `restore`) and quarantine (`wpguard-quarantine/`) go next to the site, never inside it. Backups use `tarfile` `x:zst`, which needs Python 3.14: the system `python3` may be older, so run things with `uv run`.
+- State lives in `~/.local/share/wpguard/` (wp-cli.phar, `baseline-<sha1 of path>.json`). Backups (`wpguard-backup-<site>-<ts>.tar.zst` + `.sha256`, layout: `db.sql` and `site/...`; built by `make_backup`, used by `backup`, `fix`, `restore`) and quarantine (`wpguard-quarantine/`) go next to the site, never inside it. Backups use `tarfile` `x:zst`, which needs Python 3.14 (pinned in `.python-version`; `pyproject.toml` and the script header require `>=3.14`). The system `python3` may be older (here 3.13 cannot even parse `except A, B:`), so always run through `uv run`.
 
 ## Conventions
 
