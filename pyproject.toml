@@ -35,6 +35,7 @@ Issues = "https://github.com/arian24b/wpguard/issues"
 
 [project.scripts]
 wpguard = "wpguard.cli:main"
+wpg = "wpguard.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "ruff"]

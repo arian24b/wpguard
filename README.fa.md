@@ -14,6 +14,7 @@
 uvx wpguard --help                 # اجرا بدون نصب (uv خودش پایتون ۳.۱۴ را می‌گیرد)
 uv tool install wpguard            # یا: pipx install wpguard
 pip install 'wpguard[s3]'          # بکاپ روی S3   |   'wpguard[mysql]' برای recover روی MySQL زنده
+wpg --help                         # `wpg` نام کوتاه wpguard است (همراه آن نصب می‌شود)
 wpguard setup                      # دانلود wp-cli (با بررسی sha512) و ساخت ~/.config/wpguard/wpguard.toml
 wpguard init                       # (اختیاری) ساخت ./wpguard.toml نمونه برای همین پروژه
 ```

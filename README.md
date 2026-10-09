@@ -9,9 +9,10 @@ Command line tool to scan, clean, harden, back up and monitor hacked WordPress s
 ## Install
 
 ```bash
-uvx wpguard --help                 # run without installing (uv downloads Python 3.14 if needed)
+uvx wpguard --help                 # run without installing (`uvx --from wpguard wpg` for the short name) (uv downloads Python 3.14 if needed)
 uv tool install wpguard            # or: pipx install wpguard
 pip install 'wpguard[s3]'          # S3 backups (boto3)   |   'wpguard[mysql]' for `recover` against a live MySQL
+wpg --help                         # `wpg` is a short alias of `wpguard` (installed together)
 wpguard setup                      # downloads wp-cli (sha512 verified) and creates ~/.config/wpguard/wpguard.toml
 wpguard init                       # (optional) starter ./wpguard.toml for this project
 ```

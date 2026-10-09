@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repo. User-facing docs: `README.md
 
 ## Project
 
-`wpguard` is a PyPI-ready Python >= 3.14 package (`src/wpguard`, hatchling, console script `wpguard`, `python -m wpguard`). Runtime dependencies: none. Optional extras: `s3` (boto3), `mysql` (pymysql); both are imported lazily with a friendly error. Dev tooling: `uv sync`, `uv run ruff check .`, `uv run ruff format .`, `uv run pytest`, `uv build`.
+`wpguard` is a PyPI-ready Python >= 3.14 package (`src/wpguard`, hatchling, console scripts `wpguard` and its alias `wpg` (both -> `wpguard.cli:main`), `python -m wpguard`). Runtime dependencies: none. Optional extras: `s3` (boto3), `mysql` (pymysql); both are imported lazily with a friendly error. Dev tooling: `uv sync`, `uv run ruff check .`, `uv run ruff format .`, `uv run pytest`, `uv build`.
 
 ## Module map (`src/wpguard/`)
 
