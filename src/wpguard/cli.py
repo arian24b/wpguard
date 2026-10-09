@@ -2,6 +2,7 @@
 
 import argparse
 import copy
+import shutil
 import sys
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -20,22 +21,63 @@ from wpguard.scan import scan
 from wpguard.schedule import schedule
 from wpguard.updates import updates
 
-DOC = """wpguard: scan, clean, harden, back up and monitor hacked WordPress sites with wp-cli.
+SITE_HELP = {
+    "scan": "read-only scan: files, DB, admins, updates",
+    "fix": "plan, confirm, quarantine, reinstall, harden",
+    "undo": "put quarantined files back",
+    "harden": "block PHP in uploads, wp-config constants, perms",
+    "baseline": "snapshot file hashes of a clean site",
+    "watch": "compare with the baseline, alert on changes",
+    "backup": "DB + files -> .tar.zst, upload, retention",
+    "verify": "check a backup archive",
+    "restore": "restore DB + files from a backup",
+    "audit": "inventory + findings as Markdown/JSON",
+    "diff": "diff modified core/plugin files vs wordpress.org",
+    "lock": "pin versions in wpguard.lock (--check: drift)",
+    "updates": "test pending updates on a staging copy",
+}
+OTHER_HELP = {
+    "setup": "download wp-cli, create the global config",
+    "init": "create ./wpguard.toml",
+    "discover [HOST..]": "find WordPress sites by hostname (--save)",
+    "logs [SITE..]": "find the entry point in access logs",
+    "sigs list|update": "signature feeds (hashes, YARA rules)",
+    "schedule add|remove|show": "cron/systemd timers: schedule add watch SITE",
+    "wp SITE ARGS..": "run any wp-cli command (--unsafe loads plugins)",
+    "wpscan [URL] ARGS..": "run the real WPScan (WPSCAN_TOKEN = API key)",
+    "recover ARGS..": "rebuild a wiped site from a DB/dump",
+}
 
-site commands (SITE = path, profile name, hostname like blog.example.com, host:/path or host:domain over ssh):
-  scan  fix  harden  undo  baseline  watch  backup  verify  restore  audit  diff  lock  updates
-other commands:
-  setup                      download wp-cli (sha512 verified) and create ~/.config/wpguard/wpguard.toml
-  init [--config FILE]       create a starter ./wpguard.toml (--force to overwrite)
-  discover [HOST...] [--save]  find WordPress sites by hostname on this machine / ssh hosts (nginx, apache vhosts)
-  logs [SITE...]             find the entry point in web server access logs
-  sigs list|update [NAME..]  signature feeds (maldet hashes, YARA rules)
-  schedule add|remove|show JOB SITE   cron / systemd timers (JOB: watch backup scan sigs updates)
-  wp [--unsafe] SITE ARGS... run ANY wp-cli command (plugins/themes not loaded unless --unsafe)
-  wpscan [URL] ARGS...       run the real WPScan (local or docker); WPSCAN_TOKEN is used if set
-  recover ARGS...            rebuild a wiped site from a DB / dump (see `recover --help`)
-Docs: https://github.com/arian24b/wpguard
-"""
+
+def commands_help() -> str:
+    def block(title: str, table: dict[str, str]) -> str:
+        return title + "\n" + "\n".join(f"  {name:26} {info}" for name, info in table.items())
+
+    return (
+        "wpguard: scan, clean, harden, back up and monitor WordPress sites\n\n"
+        "SITE = path | profile | hostname | host:/path | host:domain (ssh)\n\n"
+        + block("site commands (wpguard COMMAND SITE... [OPTIONS]):", SITE_HELP)
+        + "\n\n"
+        + block("other commands:", OTHER_HELP)
+        + "\n\ndocs: https://github.com/arian24b/wpguard"
+    )
+
+
+class OneLine(argparse.RawDescriptionHelpFormatter):
+    """--help with exactly one line per option: `-j, --jobs N   short info` (help text is never wrapped)."""
+
+    def __init__(self, prog: str) -> None:
+        super().__init__(prog, max_help_position=34, width=max(shutil.get_terminal_size((100, 24)).columns, 90))
+
+    def _split_lines(self, text: str, width: int) -> list[str]:  # noqa: ARG002
+        return [text]
+
+    def _format_action_invocation(self, action: argparse.Action) -> str:
+        if not action.option_strings or action.nargs == 0:
+            return super()._format_action_invocation(action)
+        return f"{', '.join(action.option_strings)} {action.metavar or action.dest.upper()}"
+
+
 SITE_CMDS: dict[str, Callable] = {
     "scan": scan, "fix": fix, "harden": harden, "undo": undo, "baseline": baseline, "watch": watch,
     "backup": backup, "verify": verify, "restore": restore, "audit": audit, "diff": diff, "lock": lock_cmd,
@@ -48,75 +90,78 @@ LOCAL_ONLY = {"config", "report", "sites_file", "jobs", "pull", "all", "help", "
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(prog="wpguard", description=DOC, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("cmd", choices=[*SITE_CMDS, "logs", "setup", "init", "discover", "sigs", "schedule"])
-    ap.add_argument("sites", nargs="*", help="paths, profile names, hostnames, host:/path or host:domain")
-    ap.add_argument("--version", action="version", version=f"wpguard {__version__}")
+    ap = argparse.ArgumentParser(
+        prog="wpguard",
+        usage="wpguard COMMAND [SITE...] [OPTIONS]",
+        description=commands_help(),
+        formatter_class=OneLine,
+    )
+    ap.add_argument(
+        "cmd", metavar="COMMAND", choices=[*SITE_CMDS, "logs", "setup", "init", "discover", "sigs", "schedule"]
+    )
+    ap.add_argument("sites", metavar="SITE", nargs="*", help="path, profile, hostname, host:/path or host:domain")
+    ap.add_argument("--version", action="version", version=f"wpguard {__version__}", help="show the version")
     g = ap.add_argument_group("general")
-    g.add_argument("--config", help="wpguard.toml (default: ./wpguard.toml, ~/.config/wpguard/wpguard.toml)")
+    g.add_argument("--config", metavar="FILE", help="config file (default ./wpguard.toml, ~/.config/wpguard/)")
     g.add_argument("--all", action="store_true", help="every site profile in the config")
-    g.add_argument("--force", action="store_true", help="(init, setup) overwrite / re-download")
-    g.add_argument("--save", action="store_true", help="(discover) add the found sites to the config")
-    g.add_argument("--sites-file")
-    g.add_argument("-j", "--jobs", type=int, default=1)
-    g.add_argument("--report", help="write report: out.json | out.html | out.txt")
-    g.add_argument("--notify", action="store_true", help="alert (telegram/email) when there are findings")
-    g.add_argument("--url", help="real site URL: pins WP_HOME/WP_SITEURL (harden/fix)")
-    g.add_argument("--ignore", action="append", help="glob of site-relative paths to ignore (repeatable)")
-    g.add_argument("--lock-file", help="path of wpguard.lock (default: next to the config, else ./)")
+    g.add_argument("--force", action="store_true", help="overwrite (init) / re-download (setup)")
+    g.add_argument("--save", action="store_true", help="(discover) add found sites to the config")
+    g.add_argument("--sites-file", metavar="FILE", help="extra sites, whitespace separated")
+    g.add_argument("-j", "--jobs", metavar="N", type=int, default=1, help="sites in parallel (default 1)")
+    g.add_argument("--report", metavar="FILE", help="write a report (.json .html .txt)")
+    g.add_argument("--notify", action="store_true", help="alert via telegram/email on findings")
+    g.add_argument("--url", metavar="URL", help="pin WP_HOME/WP_SITEURL (harden, fix)")
+    g.add_argument("--ignore", metavar="GLOB", action="append", help="ignore site-relative paths (repeatable)")
+    g.add_argument("--lock-file", metavar="FILE", help="wpguard.lock path (default next to the config)")
     d = ap.add_argument_group("detection")
-    d.add_argument("--sigs", action="append", help="file of extra regexes, one per line")
-    d.add_argument("--hashdb", action="append", help="known-bad hash database (csv/txt/json/sqlite/.hdb)")
-    d.add_argument("--hashdb-good", action="append", help="known-clean hash database (suppresses findings)")
-    d.add_argument("--yara", action="append", help="YARA rule file (needs the yara or yr binary)")
-    d.add_argument("--no-feeds", action="store_true", help="ignore downloaded signature feeds")
-    d.add_argument("--no-behavior", action="store_true", help="disable heuristic behavior scoring")
-    d.add_argument("--behavior-threshold", type=int, default=5)
-    d.add_argument("--since", type=int, help="flag PHP modified / admins created in the last N days")
+    d.add_argument("--sigs", metavar="FILE", action="append", help="extra regexes, one per line")
+    d.add_argument("--hashdb", metavar="FILE", action="append", help="known-bad hash database")
+    d.add_argument("--hashdb-good", metavar="FILE", action="append", help="known-clean hash database")
+    d.add_argument("--yara", metavar="FILE", action="append", help="YARA rules (needs yara or yr)")
+    d.add_argument("--no-feeds", action="store_true", help="skip downloaded signature feeds")
+    d.add_argument("--no-behavior", action="store_true", help="disable behavior scoring")
+    d.add_argument("--behavior-threshold", metavar="N", type=int, default=5, help="review score cutoff (default 5)")
+    d.add_argument("--since", metavar="DAYS", type=int, help="flag PHP/admins changed in the last N days")
     d.add_argument("--no-net", action="store_true", help="skip wordpress.org / WPScan lookups")
     f = ap.add_argument_group("fix / harden")
     f.add_argument("--dry-run", action="store_true", help="show the plan, change nothing")
-    f.add_argument("--yes", action="store_true", help="do not ask for confirmation")
+    f.add_argument("--yes", action="store_true", help="no confirmation prompt")
     f.add_argument("--aggressive", action="store_true", help="also quarantine behavior/yara findings")
-    f.add_argument("--clean-db", action="store_true")
-    f.add_argument("--prune", action="store_true")
-    f.add_argument("--delete-user", action="append")
-    f.add_argument("--lockdown", action="store_true", help="also DISALLOW_FILE_MODS + no auto-update (blocks updates)")
-    f.add_argument("--only", action="append", help="(undo) glob of files to restore")
+    f.add_argument("--clean-db", action="store_true", help="apply DB cleanup (default: dry run)")
+    f.add_argument("--prune", action="store_true", help="delete inactive plugins/themes")
+    f.add_argument("--delete-user", metavar="ID", action="append", help="delete this user (repeatable)")
+    f.add_argument("--lockdown", action="store_true", help="also DISALLOW_FILE_MODS (blocks updates)")
+    f.add_argument("--only", metavar="GLOB", action="append", help="(undo) restore only matching files")
     b = ap.add_argument_group("backup")
-    b.add_argument("--out", help="backup: local directory | audit: output file")
-    b.add_argument(
-        "--to", action="append", help="destination: DIR | s3://bucket/prefix | rsync:HOST:/path (repeatable)"
-    )
-    b.add_argument("--keep", type=int, help="retention: keep the newest N backups per destination")
-    b.add_argument("--no-uploads", action="store_true")
-    b.add_argument("--encrypt-to", help="age recipient (age1...) to encrypt the archive")
-    b.add_argument("--age-identity", help="age identity file (verify/restore of encrypted backups)")
-    b.add_argument("--verify", action="store_true", help="backup: verify the archive before uploading")
-    b.add_argument(
-        "--keep-local", action="store_true", help="keep the local copy when only remote destinations are set"
-    )
-    b.add_argument("--from", dest="src", help="restore/verify/undo: backup file or quarantine dir")
-    b.add_argument("--pull", help="remote backup: rsync the archive back into this directory")
+    b.add_argument("--out", metavar="PATH", help="backup: directory | audit: output file")
+    b.add_argument("--to", metavar="DEST", action="append", help="DIR | s3://bucket/prefix | rsync:HOST:/path")
+    b.add_argument("--keep", metavar="N", type=int, help="retention: newest N per destination")
+    b.add_argument("--no-uploads", action="store_true", help="leave out wp-content/uploads")
+    b.add_argument("--encrypt-to", metavar="KEY", help="age recipient (age1...) to encrypt with")
+    b.add_argument("--age-identity", metavar="FILE", help="age key for verify/restore")
+    b.add_argument("--verify", action="store_true", help="verify the archive before uploading")
+    b.add_argument("--keep-local", action="store_true", help="keep the local copy (remote-only destinations)")
+    b.add_argument("--from", metavar="PATH", dest="src", help="backup file or quarantine dir")
+    b.add_argument("--pull", metavar="DIR", help="remote backup: rsync the archive back")
     x = ap.add_argument_group("diff / lock / updates")
     x.add_argument("--core", action="store_true", help="(diff) core files only")
-    x.add_argument("--plugin", action="append", help="(diff) only this plugin slug")
-    x.add_argument("--max-lines", type=int, default=60)
-    x.add_argument("--check", action="store_true", help="(lock) report drift instead of writing")
-    x.add_argument("--apply", action="store_true", help="(updates) apply the safe updates on the real site")
-    x.add_argument("--stage-db", help="(updates) existing empty database to use for staging")
-    x.add_argument("--check-url", action="append", help="(updates) extra URL path to health-check")
-    x.add_argument("--keep-stage", action="store_true")
+    x.add_argument("--plugin", metavar="SLUG", action="append", help="(diff) only this plugin")
+    x.add_argument("--max-lines", metavar="N", type=int, default=60, help="(diff) lines per file (default 60)")
+    x.add_argument("--check", action="store_true", help="(lock) report drift, exit 1")
+    x.add_argument("--apply", action="store_true", help="(updates) apply the safe updates")
+    x.add_argument("--stage-db", metavar="NAME", help="(updates) existing empty DB for staging")
+    x.add_argument("--check-url", metavar="PATH", action="append", help="(updates) extra URL path to check")
+    x.add_argument("--keep-stage", action="store_true", help="(updates) keep the staging copy")
     s = ap.add_argument_group("schedule")
-    s.add_argument("--every", help="15m | 6h")
-    s.add_argument("--daily", help="HH:MM")
-    s.add_argument("--cron", help="raw cron expression")
-    s.add_argument("--systemd", action="store_true")
-    s.add_argument("--install", action="store_true")
+    s.add_argument("--every", metavar="15m|6h", help="run every N minutes/hours")
+    s.add_argument("--daily", metavar="HH:MM", help="run once a day")
+    s.add_argument("--cron", metavar="EXPR", help="raw cron expression")
+    s.add_argument("--systemd", action="store_true", help="systemd user timer instead of cron")
+    s.add_argument("--install", action="store_true", help="write it (default: print only)")
     o = ap.add_argument_group("output")
-    o.add_argument("--format", choices=["md", "json"], help="(audit)")
-    o.add_argument("--log", action="append", default=[], help="(logs) access log file")
-    o.add_argument("--top", type=int, default=10)
+    o.add_argument("--format", metavar="md|json", choices=["md", "json"], help="(audit) export format")
+    o.add_argument("--log", metavar="FILE", action="append", default=[], help="(logs) access log file")
+    o.add_argument("--top", metavar="N", type=int, default=10, help="(logs) rows per section (default 10)")
     return ap
 
 
@@ -172,7 +217,7 @@ def main(argv: list[str] | None = None) -> int:
         recover_main(argv[1:])
         return 0
     if not argv:
-        print(DOC)
+        print(commands_help())
         return 2
     ap = build_parser()
     ns = ap.parse_args(argv)

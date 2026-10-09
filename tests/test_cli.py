@@ -138,3 +138,27 @@ def test_setup_downloads_wpcli_and_creates_default_config(tmp_path, monkeypatch)
     assert cli.main(["setup"]) == 0
     assert downloaded
     assert (tmp_path / "cfg/wpguard.toml").exists()
+
+
+def test_help_is_one_line_per_option(capsys, monkeypatch):
+    monkeypatch.setenv("COLUMNS", "100")
+    ap = cli.build_parser()
+    with pytest.raises(SystemExit):
+        ap.parse_args(["--help"])
+    lines = capsys.readouterr().out.splitlines()
+    for act in ap._actions:
+        if not act.option_strings or act.dest == "help":
+            continue
+        flag = max(act.option_strings, key=len)
+        line = next((ln for ln in lines if ln.lstrip().startswith(tuple(act.option_strings)) and flag in ln), None)
+        assert line is not None, flag
+        assert act.help in line, f"{flag}: help text must be on the same line"
+        assert len(line) <= 100, f"{flag}: line too long"
+
+
+def test_help_lists_every_command_with_info(capsys):
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["--help"])
+    out = capsys.readouterr().out
+    for name in (*cli.SITE_CMDS, "setup", "init", "discover", "logs", "sigs", "schedule", "wp ", "wpscan", "recover"):
+        assert any(ln.strip().startswith(name) and len(ln.split()) > 2 for ln in out.splitlines()), name
