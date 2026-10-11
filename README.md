@@ -182,3 +182,16 @@ GitHub Actions (`.github/workflows/ci.yml`) runs ruff, pytest and a wheel smoke 
 ## Safety and license
 
 Use only on sites you own or are authorised to administer. MIT license (`LICENSE`). Third-party signature feeds keep their own licenses (see above).
+
+## Common commands
+
+Built with [cfui](https://github.com/arian24b/cfui), so every command shares the same look and flags:
+
+```bash
+wpguard help [command]     # help
+wpguard version            # version and git repo (also: wpguard -v)
+wpguard update [--check]   # self update
+wpguard -q ...             # quiet: no banners/notes (or WPGUARD_QUIET=1)
+```
+
+Missing required options are asked for interactively on a TTY; in pipes/CI they fail with `--flag is required`.
