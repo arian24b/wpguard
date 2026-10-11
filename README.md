@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/arian24b/wpguard/actions/workflows/ci.yml/badge.svg)](https://github.com/arian24b/wpguard/actions/workflows/ci.yml)
 
-**English** | [فارسی](https://github.com/arian24b/wpguard/blob/main/README.fa.md)
+**English** | [فارسی](README.fa.md)
 
-Command line tool to scan, clean, harden, back up and monitor hacked WordPress sites, built on [wp-cli](https://wp-cli.org/). Python 3.14, no runtime dependencies (`boto3` for S3 and `pymysql` for `recover` are optional extras).
+Command line tool to scan, clean, harden, back up and monitor hacked WordPress sites, built on [wp-cli](https://wp-cli.org/). Python 3.12 to 3.15 (3.15 preferred). The only runtime dependencies are `cfuicli` (the shared terminal UI) and, before Python 3.14, `backports.zstd` for `.tar.zst` backups. `boto3` for S3 and `pymysql` for `recover` are optional extras.
 
 ## Install
 
 ```bash
-uvx wpguard --help                 # run without installing (`uvx --from wpguard wpg` for the short name) (uv downloads Python 3.14 if needed)
+uvx wpguard --help                 # run without installing (`uvx --from wpguard wpg` for the short name) (uv downloads Python if needed)
 uv tool install wpguard            # or: pipx install wpguard
 pip install 'wpguard[s3]'          # S3 backups (boto3)   |   'wpguard[mysql]' for `recover` against a live MySQL
 wpg --help                         # `wpg` is a short alias of `wpguard` (installed together)
@@ -185,13 +185,18 @@ Use only on sites you own or are authorised to administer. MIT license (`LICENSE
 
 ## Common commands
 
-Built with [cfui](https://github.com/arian24b/cfui), so every command shares the same look and flags:
+Built on [cfuicli](https://github.com/arian24b/cfui), so it looks and behaves like the other tools in this family.
 
 ```bash
-wpguard help [command]     # help
-wpguard version            # version and git repo (also: wpguard -v)
-wpguard update [--check]   # self update
-wpguard -q ...             # quiet: no banners/notes (or WPGUARD_QUIET=1)
+wpguard help [command]     # help; -h works on any command
+wpguard version            # version and git repository (also: -v)
+wpguard update [--check]   # update the tool itself; --check only compares versions
+wpguard -q ...             # quiet: no banner or notes (or WPGUARD_QUIET=1)
 ```
 
-Missing required options are asked for interactively on a TTY; in pipes/CI they fail with `--flag is required`.
+- A missing required option is asked for when you run the tool in a terminal. In a pipe or in CI it stops with `--flag is required. Pass --flag <value> or run interactively.` (exit code 2).
+- Errors appear in a red box on stderr with a non-zero exit code. Ctrl-C exits with 130.
+- Color is used only on a terminal. `NO_COLOR=1` turns it off.
+- `wpguard help scan` (or `wpguard scan -h`) lists only the options that apply to that command, in sections. Every option is still accepted by every command, so config profiles and ssh forwarding work as before.
+- `wp`, `wpscan` and `recover` hand their arguments to wp-cli, WPScan and the recovery tool untouched, including `-h` and `-q`.
+- `fix` asks for confirmation before changing anything. In a pipe it refuses and tells you to rerun with `--yes`.
