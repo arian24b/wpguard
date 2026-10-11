@@ -1,6 +1,5 @@
 import subprocess
 import sys
-import tarfile
 import types
 from pathlib import Path
 
@@ -9,6 +8,7 @@ import pytest
 from conftest import make_script
 from wpguard import backup as bk
 from wpguard import destinations as dst
+from wpguard.backup import tarfile
 from wpguard.report import Rep
 
 DUMP = "-- MySQL dump\nCREATE TABLE wp_posts (id int);\nINSERT INTO wp_posts VALUES (1);\n"

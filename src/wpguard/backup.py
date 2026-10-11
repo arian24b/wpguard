@@ -4,9 +4,13 @@ import hashlib
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 from pathlib import Path
+
+if sys.version_info >= (3, 14):
+    import tarfile
+else:  # zstd tar support is stdlib from 3.14; older Pythons use the backport
+    from backports.zstd import tarfile
 
 from wpguard import wpcli
 from wpguard.destinations import DestError, Local, parse, upload_all

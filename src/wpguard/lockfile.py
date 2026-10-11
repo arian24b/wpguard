@@ -23,7 +23,7 @@ def path_for(a) -> Path:
 def read(p: Path) -> dict:
     try:
         data = json.loads(p.read_text())
-    except OSError, ValueError:
+    except (OSError, ValueError):
         data = {}
     data.setdefault("version", 1)
     data.setdefault("sites", {})

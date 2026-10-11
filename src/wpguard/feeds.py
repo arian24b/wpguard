@@ -53,7 +53,7 @@ def catalog(extra: dict | None = None) -> dict[str, Feed]:
 def index() -> dict:
     try:
         return json.loads(INDEX.read_text())
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return {}
 
 

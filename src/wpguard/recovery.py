@@ -191,7 +191,7 @@ def php_unser(raw) -> object:
 
     try:
         return val(0)[0]
-    except ValueError, IndexError:
+    except (ValueError, IndexError):
         return {}
 
 
@@ -751,7 +751,7 @@ def db_audit(src) -> dict:
             for uid, key, val in src.usermeta.get(bp, []):
                 try:
                     user_id = int(uid)
-                except TypeError, ValueError:
+                except (TypeError, ValueError):
                     continue
                 if key == cap and "administrator" in (val or "").lower():
                     u = by_id.get(user_id, {"id": user_id, "login": "?", "email": "?", "registered": "?"})

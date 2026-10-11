@@ -39,7 +39,7 @@ def fetch(url: str, headers: dict | None = None, timeout: int = 60) -> bytes | N
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = r.read(MAX_DOWNLOAD + 1)
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return None
     return None if len(data) > MAX_DOWNLOAD else data
 
@@ -52,5 +52,5 @@ def get_json(url: str, headers: dict | None = None) -> tuple[int, object]:
             return r.status, json.load(r)
     except urllib.error.HTTPError as e:
         return e.code, None
-    except OSError, ValueError:
+    except (OSError, ValueError):
         return 0, None
