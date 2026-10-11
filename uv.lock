@@ -32,16 +32,11 @@ wheels = [
 
 [[package]]
 name = "cfuicli"
-version = "0.2.0"
-source = { editable = "../cfui" }
-
-[package.metadata]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest", specifier = ">=8" },
-    { name = "python-semantic-release", specifier = ">=9" },
-    { name = "ruff", specifier = ">=0.8" },
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f9/65/41c351ce04555febc3ce8be6e8ad22f4b295f84fac75d14b992d2f6557b7/cfuicli-1.0.0.tar.gz", hash = "sha256:5ac86aa37f81a28a50480f8da5948226d8438e3c19cfcf9d30bf9ca9f0251580", size = 82138, upload-time = "2026-10-11T18:42:19.618Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4c/c0/2b4d39ec9ac642c58bf4a49ac999e0c0bd76bdb18866ca1e2ea95b6c78d0/cfuicli-1.0.0-py3-none-any.whl", hash = "sha256:71bedf0b8f56cdc881cbfdd711086d0b38d8ded055dec73e2d59cadc82188748", size = 11961, upload-time = "2026-10-11T18:42:18.641Z" },
 ]
 
 [[package]]
@@ -219,7 +214,7 @@ dev = [
 requires-dist = [
     { name = "boto3", marker = "extra == 'all'", specifier = ">=1.34" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
-    { name = "cfuicli", editable = "../cfui" },
+    { name = "cfuicli", specifier = ">=1.0.0" },
     { name = "pymysql", marker = "extra == 'all'", specifier = ">=1.1" },
     { name = "pymysql", marker = "extra == 'mysql'", specifier = ">=1.1" },
 ]
