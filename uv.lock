@@ -31,8 +31,8 @@ wheels = [
 ]
 
 [[package]]
-name = "cfui"
-version = "0.1.0"
+name = "cfuicli"
+version = "0.2.0"
 source = { editable = "../cfui" }
 
 [package.metadata]
@@ -40,6 +40,7 @@ source = { editable = "../cfui" }
 [package.metadata.requires-dev]
 dev = [
     { name = "pytest", specifier = ">=8" },
+    { name = "python-semantic-release", specifier = ">=9" },
     { name = "ruff", specifier = ">=0.8" },
 ]
 
@@ -193,7 +194,7 @@ wheels = [
 name = "wpguard"
 source = { editable = "." }
 dependencies = [
-    { name = "cfui" },
+    { name = "cfuicli" },
 ]
 
 [package.optional-dependencies]
@@ -218,7 +219,7 @@ dev = [
 requires-dist = [
     { name = "boto3", marker = "extra == 'all'", specifier = ">=1.34" },
     { name = "boto3", marker = "extra == 's3'", specifier = ">=1.34" },
-    { name = "cfui", editable = "../cfui" },
+    { name = "cfuicli", editable = "../cfui" },
     { name = "pymysql", marker = "extra == 'all'", specifier = ">=1.1" },
     { name = "pymysql", marker = "extra == 'mysql'", specifier = ">=1.1" },
 ]

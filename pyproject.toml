@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Security",
     "Topic :: System :: Systems Administration",
 ]
-dependencies = ["cfui>=0.1.0"]
+dependencies = ["cfuicli>=0.2.0"]
 
 [project.optional-dependencies]
 s3 = ["boto3>=1.34"]
@@ -34,7 +34,7 @@ Homepage = "https://github.com/arian24b/wpguard"
 Issues = "https://github.com/arian24b/wpguard/issues"
 
 [tool.uv.sources]
-cfui = { path = "../cfui", editable = true }  # drop once cfui is on PyPI
+cfuicli = { path = "../cfui", editable = true }  # drop once cfui is on PyPI
 
 [project.scripts]
 wpguard = "wpguard.cli:main"
