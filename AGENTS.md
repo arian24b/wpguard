@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repo. User-facing docs: `README.md
 
 ## Project
 
-`wpguard` is a PyPI-ready Python >= 3.14 package (`src/wpguard`, hatchling, console scripts `wpguard` and its alias `wpg` (both -> `wpguard.cli:main`), `python -m wpguard`). Runtime dependencies: none. Optional extras: `s3` (boto3), `mysql` (pymysql); both are imported lazily with a friendly error. Dev tooling: `uv sync`, `uv run ruff check .`, `uv run ruff format .`, `uv run pytest`, `uv build`.
+`wpguard` is a PyPI-ready Python >= 3.12 package (tested on 3.12-3.15) (`src/wpguard`, hatchling, console scripts `wpguard` and its alias `wpg` (both -> `wpguard.cli:main`), `python -m wpguard`). Runtime dependencies: none. Optional extras: `s3` (boto3), `mysql` (pymysql); both are imported lazily with a friendly error. Dev tooling: `uv sync`, `uv run ruff check .`, `uv run ruff format .`, `uv run pytest`, `uv build`.
 
 ## Module map (`src/wpguard/`)
 
@@ -41,7 +41,7 @@ Dependency direction: `cli` imports everything; command modules import `wpcli`, 
 
 ## Lint / format
 
-`pyproject.toml` enables ruff `select = ["ALL"]` with a documented ignore list. Before finishing any change run `uv run ruff check .` and `uv run ruff format .` (both must be clean). Fix findings instead of extending the ignore list; use a targeted `# noqa: CODE  reason` only when the rule is wrong for that line. ruff formats `except A, B:` without parentheses (valid on 3.14), so the system `python3` (maybe 3.13) cannot even parse the code: always use `uv run`.
+`pyproject.toml` enables ruff `select = ["ALL"]` with a documented ignore list. Before finishing any change run `uv run ruff check .` and `uv run ruff format .` (both must be clean). Fix findings instead of extending the ignore list; use a targeted `# noqa: CODE  reason` only when the rule is wrong for that line. target-version is `py312`, so ruff keeps the code parseable on 3.12 and later; use `uv run` to get the project's interpreter.
 
 ## Testing
 

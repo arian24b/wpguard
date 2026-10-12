@@ -2,11 +2,23 @@
 
 # wpguard
 
-[![CI](https://github.com/arian24b/wpguard/actions/workflows/ci.yml/badge.svg)](https://github.com/arian24b/wpguard/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/wpguard)](https://pypi.org/project/wpguard/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![CI](https://github.com/arian24b/wpguard/actions/workflows/ci.yml/badge.svg)](https://github.com/arian24b/wpguard/actions/workflows/ci.yml)
 
 [English](README.md) | **فارسی**
 
 ابزار خط فرمان برای اسکن، پاکسازی، سخت‌سازی، بکاپ و پایش سایت‌های وردپرسی هک‌شده، بر پایه [wp-cli](https://wp-cli.org/). پایتون ۳٫۱۲ تا ۳٫۱۵ (۳٫۱۵ ترجیح دارد). تنها وابستگی‌های اجرایی `cfuicli` (رابط ترمینال مشترک) و، قبل از پایتون ۳٫۱۴، `backports.zstd` برای بکاپ‌های `.tar.zst` است. `boto3` برای S3 و `pymysql` برای `recover` اختیاری‌اند.
+
+## ویژگی‌ها
+
+- `scan` فقط‌خواندنی، با امضاهای داخلی، پایگاه‌های هش، قوانین YARA، امتیاز رفتاری و فیدهای قابل دانلود؛ بررسی پایگاه‌داده برای محتوای تزریق‌شده و ادمین‌های ناشناس.
+- `fix` اول طرح را نشان می‌دهد، بکاپ می‌گیرد، فایل‌های مشکوک را به پوشهٔ قرنطینه می‌برد (با `undo` برمی‌گردند)، هسته، افزونه‌ها و پوسته‌ها را دوباره نصب می‌کند و پایگاه‌داده را پاک می‌کند.
+- بکاپ به‌صورت `tar.zst` با رمزگذاری اختیاری `age`، آپلود هم‌زمان به مقصد محلی، S3 و rsync، نگه‌داری تعداد مشخصی بکاپ و راستی‌آزمایی.
+- پایش یکپارچگی فایل‌ها با `baseline` و `watch` و هشدار؛ `schedule` خط cron یا تایمر کاربری systemd می‌نویسد.
+- روی میزبان‌های راه دور با ssh کار می‌کند و سایت را از روی hostname پیدا می‌کند.
+
+## این ابزار چیست و چگونه کار می‌کند
+
+wpguard یک بستهٔ پایتون است که [wp-cli](https://wp-cli.org/) را اجرا می‌کند (`wpguard setup` آن را دانلود و sha512اش را بررسی می‌کند) و فایل‌های سایت را خودش پیمایش می‌کند. wp-cli همیشه با `--skip-plugins --skip-themes` اجرا می‌شود، پس هنگام اسکن افزونهٔ آلوده اجرا نمی‌شود. یافته‌ها بر اساس نوع جدا می‌شوند: موردهای امضا، هش و ساختار را می‌شود با اطمینان قرنطینه کرد؛ موردهای رفتاری و YARA فقط برای بررسی دستی‌اند، مگر با `--aggressive`. وضعیت (فیدها و baselineها) در `~/.local/share/wpguard` است (با `WPGUARD_HOME` عوض می‌شود). برای هدف‌های ssh همین دستور را از راه `ssh <host> uvx wpguard ...` روی میزبان راه دور اجرا می‌کند.
 
 ## نصب
 
@@ -31,6 +43,15 @@ wpguard undo /var/www/site                       #    false positive بود؟ ف
 wpguard harden /var/www/site --lockdown --url https://your.site   # بعد از به‌روزرسانی کامل
 wpguard baseline /var/www/site                   # عکس‌برداری از وضعیت تمیز
 wpguard schedule add watch /var/www/site --every 15m --install    # هشدار با هر تغییر
+```
+
+نمونه (سایت آزمایشی که بعد از baseline یک webshell در آن گذاشته‌ایم؛ وقتی `watch` موردی پیدا کند با کد خروج ۱ تمام می‌شود):
+
+```text
+$ wpguard baseline site
+baseline: 5 files -> ~/.local/share/wpguard/baseline-a2f8df439547.json
+$ wpguard watch site
+  [new] x.php  <- SIGNATURE MATCH: signature: b'system($_GET'
 ```
 
 `SITE` می‌تواند مسیر، **نام پروفایل** در `wpguard.toml`، **نام میزبان (hostname)** مثل `blog.example.com` یا **`host:/path`** / **`host:domain`** (اجرا از طریق ssh) باشد.
@@ -179,6 +200,16 @@ wpguard -q ...             # حالت آرام: بدون بنر و یادداش�
 - `wpguard help scan` (یا `wpguard scan -h`) فقط گزینه‌های مربوط به همان دستور را در چند بخش نشان می‌دهد. همهٔ گزینه‌ها همچنان روی همهٔ دستورها پذیرفته می‌شوند، پس پروفایل‌های تنظیمات و ارسال گزینه‌ها روی ssh مثل قبل کار می‌کنند.
 - `wp`، `wpscan` و `recover` آرگومان‌ها را بدون تغییر، حتی `-h` و `-q`، به wp-cli، WPScan و ابزار بازیابی می‌دهند.
 - `fix` پیش از هر تغییر تأیید می‌گیرد. در pipe قبول نمی‌کند و می‌گوید دوباره با `--yes` اجرا کنید.
+
+## عیب‌یابی
+
+**پیام ‎`run wpguard setup first and install php`‎.** دستورهای سایت (`scan`، `fix` و مانند آن) به wp-cli و `php` نیاز دارند. `wpguard setup` را اجرا و PHP را نصب کنید. `baseline`، `watch`، `logs` و `verify` به این‌ها نیازی ندارند.
+
+**پیام ‎`not WordPress roots: [...]`‎.** در مسیر داده‌شده `wp-load.php` نیست. پوشه‌ای را بدهید که `wp-config.php` و `wp-load.php` در آن است، یا از نام پروفایل یا hostname استفاده کنید.
+
+**فایل‌ها مالک root می‌شوند.** با کاربر مالک فایل‌های سایت اجرا کنید: `sudo -u www-data wpguard ...`.
+
+**کدهای خروج.** ۰ یعنی مشکلی نبود، ۱ یافته یا شکست یک مرحله، ۲ نبودن گزینهٔ اجباری در حالت غیرتعاملی، ۱۳۰ یعنی Ctrl-C.
 
 ## توسعه
 
