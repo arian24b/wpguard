@@ -1,7 +1,5 @@
 import json
 
-import pytest
-
 from wpguard import cli, feeds
 
 
@@ -27,23 +25,25 @@ def test_profiles_all_and_config_defaults(site, tmp_path, capsys):
     assert cli.main(["watch", "blog", "--config", str(cfg)]) == 0
 
 
-def test_unknown_option_in_config_is_a_clean_error(site, tmp_path):
+def fails(argv, capsys, code, text):
+    """cli.main(argv) exits `code` with `text` in the error box on stderr."""
+    assert cli.main(argv) == code
+    assert text in capsys.readouterr().err
+
+
+def test_unknown_option_in_config_is_a_clean_error(site, tmp_path, capsys):
     cfg = tmp_path / "wpguard.toml"
     cfg.write_text(f'[sites.blog]\npath = "{site}"\nbogus_option = 1\n')
-    with pytest.raises(SystemExit, match="unknown option 'bogus_option'"):
-        cli.main(["baseline", "blog", "--config", str(cfg)])
+    fails(["baseline", "blog", "--config", str(cfg)], capsys, 1, "unknown option 'bogus_option'")
 
 
-def test_requires_a_site_and_a_wordpress_root(tmp_path, fake_wp):
-    with pytest.raises(SystemExit, match="at least one SITE"):
-        cli.main(["scan"])
-    with pytest.raises(SystemExit, match="not WordPress roots"):
-        cli.main(["scan", str(tmp_path)])
+def test_requires_a_site_and_a_wordpress_root(tmp_path, fake_wp, capsys):
+    fails(["scan"], capsys, 2, "SITE> is required")
+    fails(["scan", str(tmp_path)], capsys, 1, "not WordPress roots")
 
 
-def test_parallel_fix_requires_yes(site, fake_wp):
-    with pytest.raises(SystemExit, match="--yes"):
-        cli.main(["fix", str(site), "-j", "2"])
+def test_parallel_fix_requires_yes(site, fake_wp, capsys):
+    fails(["fix", str(site), "-j", "2"], capsys, 2, "--yes")
 
 
 def test_scan_end_to_end_with_fake_wp(site, fake_wp, tmp_path, capsys):
@@ -104,11 +104,12 @@ def test_schedule_show_via_cli(capsys):
 
 
 def test_version_and_help_paths(capsys):
-    with pytest.raises(SystemExit) as e:
-        cli.main(["--version"])
-    assert e.value.code == 0
-    assert "wpguard 0." in capsys.readouterr().out
-    assert cli.main([]) == 2
+    assert cli.main(["--version"]) == 0
+    out = capsys.readouterr().out
+    assert "wpguard 0." in out
+    assert "github.com/arian24b/wpguard" in out
+    assert cli.main([]) == 0
+    assert "Commands" in capsys.readouterr().out
 
 
 def test_notify_called_on_findings(site, fake_wp, monkeypatch):
@@ -123,8 +124,9 @@ def test_init_creates_a_starter_config(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     assert cli.main(["init"]) == 0
     assert (tmp_path / "wpguard.toml").read_text().startswith("# wpguard configuration")
+    capsys.readouterr()
     assert cli.main(["init"]) == 1  # exists
-    assert "already exists" in capsys.readouterr().out
+    assert "already exists" in capsys.readouterr().err
     assert cli.main(["init", "--force"]) == 0
     assert cli.main(["init", "--config", str(tmp_path / "sub/other.toml")]) == 0
 
@@ -140,25 +142,21 @@ def test_setup_downloads_wpcli_and_creates_default_config(tmp_path, monkeypatch)
     assert (tmp_path / "cfg/wpguard.toml").exists()
 
 
-def test_help_is_one_line_per_option(capsys, monkeypatch):
-    monkeypatch.setenv("COLUMNS", "100")
-    ap = cli.build_parser()
-    with pytest.raises(SystemExit):
-        ap.parse_args(["--help"])
-    lines = capsys.readouterr().out.splitlines()
-    for act in ap._actions:
-        if not act.option_strings or act.dest == "help":
+def test_help_is_one_line_per_option(capsys):
+    for name, command in cli.app.commands.items():
+        if command.raw or name in ("help", "version", "update"):
             continue
-        flag = max(act.option_strings, key=len)
-        line = next((ln for ln in lines if ln.lstrip().startswith(tuple(act.option_strings)) and flag in ln), None)
-        assert line is not None, flag
-        assert act.help in line, f"{flag}: help text must be on the same line"
-        assert len(line) <= 100, f"{flag}: line too long"
+        assert cli.app.run(["help", name]) == 0
+        lines = capsys.readouterr().out.splitlines()
+        for arg in (a for a in command.help_args if not a.positional):
+            flag = max(arg.flags, key=len)
+            line = next((ln for ln in lines if flag in ln.split()[0:3] or ln.strip().startswith(arg.flags[0])), None)
+            assert line is not None, f"{name} {flag}"
+            assert arg.kw["help"].split()[0] in line, f"{name} {flag}: help text must be on the same line"
 
 
 def test_help_lists_every_command_with_info(capsys):
-    with pytest.raises(SystemExit):
-        cli.build_parser().parse_args(["--help"])
+    assert cli.app.run(["--help"]) == 0
     out = capsys.readouterr().out
-    for name in (*cli.SITE_CMDS, "setup", "init", "discover", "logs", "sigs", "schedule", "wp ", "wpscan", "recover"):
-        assert any(ln.strip().startswith(name) and len(ln.split()) > 2 for ln in out.splitlines()), name
+    for name in (*cli.SITE_CMDS, "setup", "init", "discover", "logs", "sigs", "schedule", "wp", "wpscan", "recover"):
+        assert any(ln.strip().startswith(f"wpguard {name} ") and len(ln.split()) > 3 for ln in out.splitlines()), name

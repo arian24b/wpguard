@@ -19,7 +19,7 @@ def lookup(kind: str, name: str, version: str, token: str) -> list[tuple[str, st
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             data = json.load(r)
-    except urllib.error.URLError, OSError, ValueError:
+    except (urllib.error.URLError, OSError, ValueError):
         return []
     return [
         (v["title"], v.get("fixed_in"))

@@ -130,9 +130,9 @@ def test_cli_local_hostname_resolves_through_vhosts(fake_collect, site, monkeypa
     assert cli.main(["baseline", "blog.test"]) == 0
 
 
-def test_unknown_hostname_is_a_clean_error(fake_collect, fake_wp):
-    with pytest.raises(SystemExit, match=r"no WordPress site for 'nope.example.com'"):
-        cli.main(["scan", "nope.example.com"])
+def test_unknown_hostname_is_a_clean_error(fake_collect, fake_wp, capsys):
+    assert cli.main(["scan", "nope.example.com"]) == 1
+    assert "no WordPress site for 'nope.example.com'" in capsys.readouterr().err
 
 
 def test_discover_command_lists_and_saves(fake_collect, tmp_path, capsys):

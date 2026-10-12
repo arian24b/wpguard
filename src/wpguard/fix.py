@@ -7,6 +7,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from cfui import ui
+
 from wpguard import lockfile, wpcli
 from wpguard.backup import make_backup
 from wpguard.dbscan import db_clean
@@ -171,7 +173,7 @@ def confirm(a, rep: Rep) -> bool:
     if a.yes:
         return True
     if sys.stdin.isatty():
-        return input("Proceed with the plan above? [y/N] ").strip().lower().startswith("y")
+        return ui.confirm("Proceed with the plan above?", default=False)
     rep.log("refusing to change anything non-interactively: review the plan, then rerun with --yes")
     return False
 
