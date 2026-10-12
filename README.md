@@ -1,10 +1,22 @@
 # wpguard
 
-[![CI](https://github.com/arian24b/wpguard/actions/workflows/ci.yml/badge.svg)](https://github.com/arian24b/wpguard/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/wpguard)](https://pypi.org/project/wpguard/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![CI](https://github.com/arian24b/wpguard/actions/workflows/ci.yml/badge.svg)](https://github.com/arian24b/wpguard/actions/workflows/ci.yml)
 
 **English** | [فارسی](README.fa.md)
 
 Command line tool to scan, clean, harden, back up and monitor hacked WordPress sites, built on [wp-cli](https://wp-cli.org/). Python 3.12 to 3.15 (3.15 preferred). The only runtime dependencies are `cfuicli` (the shared terminal UI) and, before Python 3.14, `backports.zstd` for `.tar.zst` backups. `boto3` for S3 and `pymysql` for `recover` are optional extras.
+
+## Features
+
+- Read-only `scan` with built-in signatures, hash databases, YARA rules, a behavior score and downloadable feeds; DB checks for injected content and unknown admins.
+- `fix` shows a plan first, takes a backup, moves suspicious files to a quarantine folder (reversible with `undo`), reinstalls core, plugins and themes, and cleans the DB.
+- Backups as `tar.zst` with optional `age` encryption, concurrent upload to local, S3 and rsync destinations, retention and verification.
+- `baseline` / `watch` file-integrity monitoring with alerts; `schedule` writes cron lines or systemd user timers.
+- Works on remote hosts over ssh and finds sites by hostname.
+
+## What it is and how it works
+
+wpguard is a single Python package that drives [wp-cli](https://wp-cli.org/) (downloaded and sha512-verified by `wpguard setup`) and walks the site's files itself. wp-cli is always run with `--skip-plugins --skip-themes`, so a compromised plugin is not executed while scanning. Findings are matched by kind: signature, hash and structure hits are safe to quarantine; behavior and YARA hits are review-only unless `--aggressive`. State (feeds, baselines) lives in `~/.local/share/wpguard` (override with `WPGUARD_HOME`). For ssh targets it runs the same command remotely through `ssh <host> uvx wpguard ...`.
 
 ## Install
 
@@ -29,6 +41,15 @@ wpguard undo /var/www/site                       #    false positive? put quaran
 wpguard harden /var/www/site --lockdown --url https://your.site   # after everything is updated
 wpguard baseline /var/www/site                   # snapshot the clean state
 wpguard schedule add watch /var/www/site --every 15m --install    # alert on any change
+```
+
+Sample (a throwaway site with a webshell dropped in after the baseline; `watch` exits 1 on findings):
+
+```text
+$ wpguard baseline site
+baseline: 5 files -> ~/.local/share/wpguard/baseline-a2f8df439547.json
+$ wpguard watch site
+  [new] x.php  <- SIGNATURE MATCH: signature: b'system($_GET'
 ```
 
 `SITE` can be a path, a **profile name** from `wpguard.toml`, a **hostname** (`blog.example.com`), or **`host:/path`** / **`host:domain`** to run it over ssh (see below).
@@ -159,6 +180,16 @@ Jobs: `watch backup scan sigs updates`; `watch`, `scan` and `updates` run with `
 **Wiped site**: `wpguard recover --dump site.sql --db NAME --user U --out site --list` (inventory), then without `--list` to download core/plugins/themes at the versions the DB records; restore uploads and premium code from a backup and continue as above.
 
 **Audit**: `wpguard audit blog --out blog.md` (or `.json`): versions, settings, plugins, themes, users by role, cron hooks, mu-plugins, drop-ins, `wp-config.php` constants with DB user/password/salts redacted, plus all findings.
+
+## Troubleshooting
+
+**Message: run `wpguard setup` first and install php.** Site commands (`scan`, `fix`, ...) need wp-cli and `php`. Run `wpguard setup` and install PHP. `baseline`, `watch`, `logs` and `verify` do not need them.
+
+**Message: not WordPress roots.** The path has no `wp-load.php`. Point at the directory that contains `wp-config.php` and `wp-load.php`, or use a profile name or hostname.
+
+**Files end up owned by root.** Run as the site's file owner: `sudo -u www-data wpguard ...`.
+
+**Exit codes.** 0 clean, 1 findings or a failed step, 2 missing required option in non-interactive mode, 130 Ctrl-C.
 
 ## Development
 
